@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <nds/ndstypes.h>
-#include <nds/debug.h>
 #include "patch.h"
 #include "find.h"
 #include "hook.h"
@@ -9,6 +8,7 @@
 #include "cardengine_header_arm9.h"
 #include "debug_file.h"
 #include "nds_header.h"
+#include "nocashMessage.h"
 
 #define b_expansionPakFound BIT(0)
 #define b_extendedMemory BIT(1)
@@ -20,7 +20,6 @@
 #define b_cacheFlushFlag BIT(7)
 #define b_cardReadFix BIT(8)
 #define b_bypassExceptionHandler BIT(9)
-#define b_softResetMb BIT(13)
 
 
 static const int MAX_HANDLER_LEN = 50;
@@ -156,6 +155,7 @@ static u32* hookInterruptHandler(const u32* start, size_t size) {
 
 int hookNdsRetailArm9(
 	cardengineArm9* ce9,
+	const u32 dldiOffset,
 	const tNDSHeader* ndsHeader,
 	const module_params_t* moduleParams,
 	u32 bootNdsCluster,
@@ -187,17 +187,24 @@ int hookNdsRetailArm9(
 	const bool usesCloneboot,
 	u32 overlaysSize,
 	u32 ioverlaysSize,
+	u32 arm9iromOffset,
+	u32 arm9ibinarySize,
 	u32 maxClusterCacheSize,
     u32 fatTableAddr
 ) {
 	nocashMessage("hookNdsRetailArm9");
 
+	extern u8 _io_dldi_size;
 	const char* romTid = getRomTid(ndsHeader);
 	extern u32 romPaddingSize;
+	extern u32 dataToPreloadAddr;
+	extern u32 dataToPreloadSize;
+	extern bool dataToPreloadFound(const tNDSHeader* ndsHeader);
 	extern u32 romLocation;
 	extern u16 s2FlashcardId;
 	extern bool maxHeapOpen;
 
+	ce9->dldiOffset             = dldiOffset;
 	ce9->bootNdsCluster         = bootNdsCluster;
 	ce9->fileCluster            = fileCluster;
 	ce9->saveCluster            = saveCluster;
@@ -215,7 +222,7 @@ int hookNdsRetailArm9(
 	ce9->apFixOverlaysCluster   = apFixOverlaysCluster;
 	ce9->musicCluster           = musicCluster;
 	ce9->musicsSize             = musicsSize;
-	ce9->musicBuffer = maxHeapOpen ? 0x027F8000 : 0x027F0000;
+	ce9->musicBuffer = maxHeapOpen ? ((_io_dldi_size == 0x0F) ? 0x027F6000 : (_io_dldi_size == 0x0E) ? 0x027FA000 : 0x027FC000)-0x4000 : 0x027F0000;
 	ce9->pageFileCluster        = pageFileCluster;
 	ce9->manualCluster          = manualCluster;
 	ce9->sharedFontCluster      = sharedFontCluster;
@@ -237,11 +244,8 @@ int hookNdsRetailArm9(
 	if (isSdk5(moduleParams)) {
 		ce9->valueBits |= b_isSdk5;
 	}
-	if (strncmp(romTid, "CLJ", 3) == 0) {
+	if (strncmp(romTid, "CLJ", 3) == 0 || strncmp(romTid, "IPK", 3) == 0 || strncmp(romTid, "IPG", 3) == 0) {
 		ce9->valueBits |= b_cacheFlushFlag;
-	}
-	if (patchOffsetCache.resetMb) {
-		ce9->valueBits |= b_softResetMb;
 	}
 	if (strncmp(romTid, "AZE", 3) == 0) { // Zelda: Phantom Hourglass
 		ce9->valueBits |= b_bypassExceptionHandler;
@@ -251,11 +255,13 @@ int hookNdsRetailArm9(
 	ce9->overlaysSrc            = (ndsHeader->arm9overlaySource > ndsHeader->arm7romOffset) ? (ndsHeader->arm9romOffset + ndsHeader->arm9binarySize) : ndsHeader->arm9overlaySource;
 	ce9->overlaysSize           = overlaysSize;
 	ce9->ioverlaysSize          = ioverlaysSize;
+	ce9->arm9iromOffset         = arm9iromOffset;
+	ce9->arm9ibinarySize        = arm9ibinarySize;
 	ce9->romPaddingSize         = romPaddingSize;
 	ce9->romLocation            = romLocation;
 
-	u32 romOffset = 0;
 	if (ROMinRAM) {
+		u32 romOffset = 0;
 		if (usesCloneboot) {
 			romOffset = 0x8000;
 		} else if (ndsHeader->arm9overlaySource == 0 || ndsHeader->arm9overlaySize == 0) {
@@ -264,6 +270,10 @@ int hookNdsRetailArm9(
 			romOffset = ce9->overlaysSrc;
 		}
 		ce9->romLocation -= romOffset;
+	} else if (dataToPreloadFound(ndsHeader)) {
+		ce9->romLocation -= dataToPreloadAddr;
+		ce9->romPartSrc = dataToPreloadAddr;
+		ce9->romPartSize = dataToPreloadSize;
 	}
 
 	if (strncmp(romTid, "IPK", 3) == 0 || strncmp(romTid, "IPG", 3) == 0) {

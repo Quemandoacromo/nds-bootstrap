@@ -40,7 +40,8 @@
 	.global romIsCompressed
 	.global patchOffsetCacheFileCluster
 	.global srParamsFileCluster
-	.global ndsPreloaded
+	.global soundFreq
+@	.global ndsPreloaded
 @---------------------------------------------------------------------------------
 	.align	4
 	.arm
@@ -86,8 +87,11 @@ patchOffsetCacheFileCluster:
 	.word	0x00000000
 srParamsFileCluster:
 	.word	0x00000000
-ndsPreloaded:
+soundFreq:
 	.word	0x00000000
+@ndsPreloaded:
+	.word	0x00000000
+
 
 startUp:
 	mov	r0, #0x04000000

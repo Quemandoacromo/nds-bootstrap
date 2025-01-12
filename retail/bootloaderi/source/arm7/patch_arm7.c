@@ -16,6 +16,7 @@ extern u8 saveOnFlashcard;
 extern u16 a9ScfgRom;
 //extern u8 dsiSD;
 
+extern bool i2cBricked;
 extern bool sdRead;
 
 extern u32 newArm7binarySize;
@@ -117,20 +118,21 @@ void setBLThumb(int arg1, int arg2) {
 	*(u16*)(arg1 + 2) = instrs[1];
 }
 
-u16* getOffsetFromBLThumb(u16* blOffset) {
-	s16 codeOffset = blOffset[1];
-
-	return (u16*)((u32)blOffset + (codeOffset*2) + 4);
+u16* getOffsetFromBLThumb(const u16* blOffset) {
+	const u32* instructionPointer = (u32*)blOffset;
+	u32 blInstruction1 = ((u16*)instructionPointer)[0];
+	u32 blInstruction2 = ((u16*)instructionPointer)[1];
+	u32 res = (u32)instructionPointer + 5 + ((int)((((blInstruction1 & 0x7FF) << 11) | (blInstruction2 & 0x7FF)) << 10) >> 9);
+	res--;
+	return (u16*)res;
 }
 
 u32 vAddrOfRelocSrc = 0;
 u32 relocDestAtSharedMem = 0;
-/*u32 newSwiHaltAddr = 0;
-bool swiHaltPatched = false;
+/* u32 newSwiHaltAddr = 0;
+// bool swiHaltPatched = false;
 
-static void patchSwiHalt(const cardengineArm7* ce7, const tNDSHeader* ndsHeader, const module_params_t* moduleParams, u32 ROMinRAM) {
-	extern bool setDmaPatched;
-
+static void patchSwiHalt(const cardengineArm7* ce7, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
 	u32* swiHaltOffset = patchOffsetCache.swiHaltOffset;
 	if (!patchOffsetCache.swiHaltOffset) {
 		swiHaltOffset = patchOffsetCache.a7IsThumb ? (u32*)findSwiHaltThumbOffset(ndsHeader, moduleParams) : findSwiHaltOffset(ndsHeader, moduleParams);
@@ -139,25 +141,12 @@ static void patchSwiHalt(const cardengineArm7* ce7, const tNDSHeader* ndsHeader,
 		}
 	}
 
-	bool doPatch = ((!gameOnFlashcard && !ROMinRAM) || ((ROMinRAM && !extendedMemoryConfirmed && setDmaPatched) && (ndsHeader->unitCode == 0 || (ndsHeader->unitCode > 0 && !dsiModeConfirmed))));
-	const char* romTid = getRomTid(ndsHeader);
-	if ((u32)ce7 == CARDENGINEI_ARM7_SDK5_LOCATION
-	 || strncmp(romTid, "CBB", 3) == 0		// Big Bang Mini
-	 || strncmp(romTid, "AFF", 3) == 0		// Final Fantasy III
-	 || strncmp(romTid, "AWI", 3) == 0		// Hotel Dusk: Room 215
-	 || strncmp(romTid, "YLU", 3) == 0		// Last Window: The Secret of Cape West
-	 || strncmp(romTid, "AWV", 3) == 0		// Nervous Brickdown
-	 || strncmp(romTid, "AH9", 3) == 0		// Tony Hawk's American Sk8Land
-	) {
-		doPatch = false;
-	}
-
-	if (swiHaltOffset && swiHaltHook && doPatch) {
+	if (swiHaltOffset) {
 		// Patch
 		if (patchOffsetCache.a7IsThumb) {
-			tonccpy((u16*)newSwiHaltAddr, ce7->patches->newSwiHaltThumb, 0x10);
-			u32 srcAddr = (u32)swiHaltOffset - vAddrOfRelocSrc + 0x37F8000;
-			u32 dstAddr = (u32)newSwiHaltAddr - vAddrOfRelocSrc + 0x37F8000;
+			tonccpy((u16*)newSwiHaltAddr, ce7->patches->newSwiHaltThumb, 0x18);
+			u32 srcAddr = (u32)swiHaltOffset - vAddrOfRelocSrc + (*(u32*)0x02FFE1A0==0x080037C0 ? 0x37C0000 : 0x37F8000);
+			u32 dstAddr = (u32)newSwiHaltAddr - vAddrOfRelocSrc + (*(u32*)0x02FFE1A0==0x080037C0 ? 0x37C0000 : 0x37F8000);
 			const u16* swiHaltPatch = generateA7InstrThumb(srcAddr, dstAddr);
 			tonccpy(swiHaltOffset, swiHaltPatch, 0x4);
 
@@ -168,17 +157,30 @@ static void patchSwiHalt(const cardengineArm7* ce7, const tNDSHeader* ndsHeader,
 			u32* swiHaltPatch = ce7->patches->j_newSwiHalt;
 			tonccpy(swiHaltOffset, swiHaltPatch, 0xC);
 		}
-		swiHaltPatched = true;
+		// swiHaltPatched = true;
 		dbg_printf("swiHalt hooked\n");
 	}
 
     dbg_printf("swiHalt location : ");
     dbg_hexa((u32)swiHaltOffset);
     dbg_printf("\n\n");
-}*/
+} */
 
 void patchScfgExt(const tNDSHeader* ndsHeader) {
-	if (ndsHeader->unitCode == 0 || newArm7binarySize == 0x44C) return;
+	if (ndsHeader->unitCode == 0) return;
+
+	const u32 scfgLoc = 0x2FFFD00;
+
+	if (dsiModeConfirmed) {
+		*(u16*)(scfgLoc+0x00) = 0x0101;
+		//*(u16*)(scfgLoc+0x04) = 0x0187;
+		//*(u16*)(scfgLoc+0x06) = 0;
+		*(u32*)(scfgLoc+0x08) = 0x93FFFB06;
+		//*(u16*)(scfgLoc+0x20) = 1;
+		//*(u16*)(scfgLoc+0x24) = 0;
+	}
+
+	if (newArm7binarySize == 0x44C) return;
 
 	u32* scfgExtOffset = patchOffsetCache.a7ScfgExtOffset;
 	if (!patchOffsetCache.a7ScfgExtOffset) {
@@ -187,16 +189,7 @@ void patchScfgExt(const tNDSHeader* ndsHeader) {
 			patchOffsetCache.a7ScfgExtOffset = scfgExtOffset;
 		}
 	}
-	if (scfgExtOffset && dsiModeConfirmed) {
-		u32 scfgLoc = 0x2FFFD00;
-
-		*(u16*)(scfgLoc+0x00) = 0x0101;
-		//*(u16*)(scfgLoc+0x04) = 0x0187;
-		//*(u16*)(scfgLoc+0x06) = 0;
-		*(u32*)(scfgLoc+0x08) = 0x93FFFB06;
-		//*(u16*)(scfgLoc+0x20) = 1;
-		//*(u16*)(scfgLoc+0x24) = 0;
-
+	if (scfgExtOffset) {
 		scfgExtOffset[0] = scfgLoc+0x08;
 		//scfgExtOffset[1] = scfgLoc+0x20;
 		//scfgExtOffset[2] = scfgLoc+0x04;
@@ -372,6 +365,42 @@ static void patchMirrorCheck(const tNDSHeader* ndsHeader, const module_params_t*
 	dbg_printf("\n\n");
 }
 
+bool hasVramWifiBinary = false;
+static void patchVramWifiBinaryLoad(const cardengineArm7* ce7, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
+	if (ndsHeader->unitCode > 0 || moduleParams->sdk_version < 0x2008000) return;
+
+	// Relocate VRAM WiFi binary from Main RAM to DSi WRAM
+	u32* offset = (u32*)patchOffsetCache.relocateStartOffset;
+	const u32 add = ((u32)ce7 == CARDENGINEI_ARM7_LOCATION) ? 0x00FE0000 : 0x00820000; // 0x037C0000 : 0x03000000
+	bool found = false;
+	for (int i = 0; i < 0x100/sizeof(u32); i++) {
+		if (*offset >= 0x027E0000 && *offset < 0x027E0200) {
+			*offset += add;
+			found = true;
+			break;
+		}
+		offset++;
+	}
+	if (!found) {
+		return;
+	}
+
+	hasVramWifiBinary = true;
+
+	dbg_printf("VRAM WiFi binary load location end : ");
+	dbg_hexa((u32)offset);
+	dbg_printf("\n\n");
+
+	offset = (u32*)patchOffsetCache.relocateStartOffset;
+
+	for (int i = 0; i < 0x80/sizeof(u32); i++) {
+		if (offset[i] == 0x0A000000) {
+			offset[i+1] = 0xE1A00000; // nop
+			break;
+		}
+	}
+}
+
 static void patchSleepMode(const tNDSHeader* ndsHeader) {
 	// Sleep
 	u32* sleepPatchOffset = patchOffsetCache.sleepPatchOffset;
@@ -397,6 +426,32 @@ static void patchSleepMode(const tNDSHeader* ndsHeader) {
 	}
 }
 
+void patchSleepInputWrite(const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
+	u32* offset = patchOffsetCache.sleepInputWriteOffset;
+	if (!patchOffsetCache.sleepInputWriteOffset) {
+		offset = findSleepInputWriteOffset(ndsHeader, moduleParams);
+		if (offset) {
+			patchOffsetCache.sleepInputWriteOffset = offset;
+		}
+	}
+	if (!offset) {
+		return;
+	}
+
+	if (!sleepMode) {
+		if (*offset == 0x13A04902 || *offset == 0x11A05004) {
+			*offset = 0xE1A00000; // nop
+		} else {
+			u16* offsetThumb = (u16*)offset;
+			*offsetThumb = 0x46C0; // nop
+		}
+	}
+
+	dbg_printf("Sleep input write location : ");
+	dbg_hexa((u32)offset);
+	dbg_printf("\n\n");
+}
+
 static void patchRamClear(const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
 	if (moduleParams->sdk_version < 0x5000000 || ndsHeader->unitCode == 0 || dsiModeConfirmed) {
 		return;
@@ -411,7 +466,7 @@ static void patchRamClear(const tNDSHeader* ndsHeader, const module_params_t* mo
 	}
 	if (ramClearOffset) {
 		*(ramClearOffset) = 0x02FFC000;
-		*(ramClearOffset + 1) = 0x02FFD000;
+		*(ramClearOffset + 1) = 0x02FFC000;
 		dbg_printf("RAM clear location : ");
 		dbg_hexa((u32)ramClearOffset);
 		dbg_printf("\n\n");
@@ -546,6 +601,18 @@ static void patchCardCheckPullOut(cardengineArm7* ce7, const tNDSHeader* ndsHead
 	}
 }
 
+static void patchSrlStart(cardengineArm7* ce7, const tNDSHeader* ndsHeader) {
+	u32* offset = findSrlStartOffset7(ndsHeader);
+	if (!offset) {
+		return;
+	}
+
+	offset[0] = 0xE3A00001; // mov r0, #1
+	offset[1] = 0xE59FC000; // ldr r12, =reset
+	offset[2] = 0xE12FFF1C; // bx r12
+	offset[3] = (u32)ce7->patches->reset;
+}
+
 static void patchSdCardReset(const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
 	if (ndsHeader->unitCode == 0 || !dsiModeConfirmed) return;
 
@@ -565,6 +632,66 @@ static void patchSdCardReset(const tNDSHeader* ndsHeader, const module_params_t*
 		dbg_hexa((u32)sdCardResetOffset);
 		dbg_printf("\n\n");
 	}
+}
+
+bool patchSdCardFuncs(cardengineArm7* ce7, const tNDSHeader* ndsHeader) {
+	u32* offset = patchOffsetCache.sdCardFuncsOffset;
+	if (!patchOffsetCache.sdCardFuncsOffset) {
+		offset = findSdCardFuncsOffset(ndsHeader);
+		if (offset) {
+			patchOffsetCache.sdCardFuncsOffset = offset;
+		}
+	}
+
+	if (!offset) {
+		return false;
+	}
+
+	u16* offsetThumb = (u16*)offset;
+	if (*offsetThumb == 0xB518) {
+		ce7->romPartLocation = (u32)getOffsetFromBLThumb((u16*)((u8*)offset - 0x20)); // getDriveStructAddr
+		ce7->romPartLocation++;
+		*(u32*)((u8*)offset + 0x44) = ce7->patches->arm7Functions->eepromProtect; // __patch_dsisdredirect_io
+		*(u32*)((u8*)offset + 0x48) = ce7->patches->arm7Functions->eepromPageErase; // __patch_dsisdredirect_control
+	} else {
+		ce7->romPartLocation = (u32)getOffsetFromBL((u32*)((u8*)offset - 0x20)); // getDriveStructAddr
+		*(u32*)((u8*)offset + 0x64) = ce7->patches->arm7Functions->eepromProtect; // __patch_dsisdredirect_io
+		*(u32*)((u8*)offset + 0x68) = ce7->patches->arm7Functions->eepromPageErase; // __patch_dsisdredirect_control
+	}
+
+	dbg_printf("sdCardFuncs location : ");
+	dbg_hexa((u32)offset);
+	dbg_printf("\n\n");
+	return true;
+}
+
+void patchAutoPowerOff(const tNDSHeader* ndsHeader) {
+	if (!i2cBricked || ndsHeader->unitCode == 0 || !dsiModeConfirmed) return;
+
+	u32* offset = patchOffsetCache.autoPowerOffOffset;
+	if (!patchOffsetCache.autoPowerOffOffset) {
+		offset = findAutoPowerOffOffset(ndsHeader);
+		if (offset) {
+			patchOffsetCache.autoPowerOffOffset = offset;
+		}
+	}
+
+	if (!offset) {
+		return;
+	}
+
+	u16* offsetThumb = (u16*)offset;
+	if (offsetThumb[0] == 0xB5F8) {
+		offsetThumb[0] = 0x2004; // movs r0, #4
+		offsetThumb[1] = 0x4770; // bx lr
+	} else {
+		offset[0] = 0xE3A00004; // mov r0, #4
+		offset[1] = 0xE12FFF1E; // bx lr
+	}
+
+	dbg_printf("autoPowerOff location : ");
+	dbg_hexa((u32)offset);
+	dbg_printf("\n\n");
 }
 
 static void operaRamPatch(void) {
@@ -588,7 +715,7 @@ u32 patchCardNdsArm7(
 	newArm7binarySize = ndsHeader->arm7binarySize;
 	newArm7ibinarySize = __DSiHeader->arm7ibinarySize;
 
-	if (((ndsHeader->unitCode > 0) ? (REG_SCFG_EXT == 0) : (memcmp(ndsHeader->gameCode, "AYI", 3) == 0 && ndsHeader->arm7binarySize == 0x25F70)) && *(u32*)DONOR_ROM_ARM7_SIZE_LOCATION != 0) {
+	if (((ndsHeader->unitCode > 0) ? (REG_SCFG_EXT == 0) : (memcmp(ndsHeader->gameCode, "AYI", 3) == 0 && ndsHeader->arm7binarySize == 0x25F70)) && ((u32)ndsHeader->arm9destination+ndsHeader->arm9binarySize) < DONOR_ROM_ARM7_LOCATION && *(u32*)DONOR_ROM_ARM7_SIZE_LOCATION != 0) {
 		// Replace incompatible ARM7 binary
 		newArm7binarySize = *(u32*)DONOR_ROM_ARM7_SIZE_LOCATION;
 		newArm7ibinarySize = *(u32*)DONOR_ROM_ARM7I_SIZE_LOCATION;
@@ -604,6 +731,7 @@ u32 patchCardNdsArm7(
 	patchPostBoot(ndsHeader);
 	patchScfgExt(ndsHeader);
 	patchSleepMode(ndsHeader);
+	patchSleepInputWrite(ndsHeader, moduleParams);
 
 	patchRamClear(ndsHeader, moduleParams);
 	patchRamClearI(ndsHeader, moduleParams, false);
@@ -629,8 +757,13 @@ u32 patchCardNdsArm7(
 		patchCardCheckPullOut(ce7, ndsHeader, moduleParams);
 	}
 
+	if (patchOffsetCache.srlStartOffset9) {
+		patchSrlStart(ce7, ndsHeader);
+	}
+
 	if (a7GetReloc(ndsHeader, moduleParams)) {
 		patchMirrorCheck(ndsHeader, moduleParams);
+		patchVramWifiBinaryLoad(ce7, ndsHeader, moduleParams);
 		u32 saveResult = 0;
 		
 		if (newArm7binarySize==0x2352C || newArm7binarySize==0x235DC || newArm7binarySize==0x23CAC || newArm7binarySize==0x245C0 || newArm7binarySize==0x245C4) {
@@ -663,7 +796,7 @@ u32 patchCardNdsArm7(
 		}*/
 	}
 
-	//patchSwiHalt(ce7, ndsHeader, moduleParams, ROMinRAM);
+	// patchSwiHalt(ce7, ndsHeader, moduleParams);
 
 	if (strcmp(romTid, "UBRP") == 0) {
 		operaRamPatch();
@@ -674,6 +807,8 @@ u32 patchCardNdsArm7(
 	//if (!gameOnFlashcard) {
 		patchSdCardReset(ndsHeader, moduleParams);
 	//}
+
+	patchAutoPowerOff(ndsHeader);
 
 	dbg_printf("ERR_NONE\n\n");
 	return ERR_NONE;

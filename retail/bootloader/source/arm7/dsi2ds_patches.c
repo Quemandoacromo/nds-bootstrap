@@ -36,6 +36,7 @@ static void patchMsg16(u32 addr, const char* msg) {
 }
 
 void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
+	extern u8 _io_dldi_size;
 	extern bool ce9Alt;
 	extern bool ce9AltLargeTable;
 	extern bool expansionPakFound;
@@ -60,16 +61,26 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	const bool ce9NotInHeap = (ce9Alt || (u32)ce9 == CARDENGINE_ARM9_LOCATION_DLDI_START);
 	const bool wirelessCodeInVram = (*(u32*)(((u32)ndsHeader->arm7destination) + newArm7binarySize - 0x24) == 0x027E0000);
+	if (wirelessCodeInVram) {
+		*(u32*)(((u32)ndsHeader->arm7destination) + newArm7binarySize - 0xC) = 0; // Disable loading VRAM wireless code to RAM
+	}
 	maxHeapOpen = (!extendedMemory && ce9NotInHeap && wirelessCodeInVram);
-	const u32 heapEndRetail = (ce9NotInHeap && !ce9AltLargeTable) ? ((cheatSizeTotal <= 4) ? 0x023E0000 : CHEAT_ENGINE_LOCATION_B4DS-0x400000) : ((fatTableAddr < 0x023C0000 || fatTableAddr >= (u32)ce9) ? (u32)ce9 : fatTableAddr);
-	const u32 heapEnd = extendedMemory ? (((u32)ndsHeader->arm9destination >= 0x02004000) ? CARDENGINE_ARM9_LOCATION_DLDI_EXTMEM : 0x02700000) : heapEndRetail;
+	u32 heapEndRetail = (ce9NotInHeap && !ce9AltLargeTable) ? ((cheatSizeTotal <= 4 || _io_dldi_size >= 0x0E) ? 0x023E0000 : CHEAT_ENGINE_LOCATION_B4DS-0x400000) : ((fatTableAddr < 0x023C0000 || fatTableAddr >= (u32)ce9) ? (u32)ce9 : fatTableAddr);
+	if (!extendedMemory && !maxHeapOpen && !wirelessCodeInVram && _io_dldi_size >= 0x0E) {
+		const u32 ce9DldiOffset = (_io_dldi_size == 0x0F) ? 0x023D8000 : 0x023DC000;
+		heapEndRetail = ((u32)ndsHeader->arm9destination >= 0x02004000) ? ce9DldiOffset : CARDENGINE_ARM9_LOCATION_DLDI_32;
+	}
+	const u32 heapEnd = extendedMemory ? (((u32)ndsHeader->arm9destination >= 0x02004000) ? 0x027D8000 : 0x02700000) : heapEndRetail;
 	const u32 heapEnd8MBHack = extendedMemory ? heapEnd : heapEndRetail+0x400000; // extendedMemory ? #0x27B0000 : #0x27E0000 (mirrors to 0x23E0000 on retail DS units)
 	const u32 heapEndExceed = extendedMemory ? heapEnd+0x800000 : heapEndRetail+0xC00000; // extendedMemory ? #0x2FB0000 (mirrors to 0x27B0000 on debug DS units) : #0x2FE0000 (mirrors to 0x23E0000 on retail DS units)
-	const u32 heapEndMaxForRetail = maxHeapOpen ? 0x023FC000 : heapEnd;
-	const u32 heapEndMaxForRetailMus = maxHeapOpen ? 0x023F8000 : heapEnd;
+	const u32 heapEndMaxForRetail = maxHeapOpen ? ((_io_dldi_size == 0x0F) ? 0x023F6000 : (_io_dldi_size == 0x0E) ? 0x023FA000 : 0x023FC000) : heapEnd;
+	const u32 heapEndMaxForRetail2 = maxHeapOpen ? ((_io_dldi_size == 0x0F) ? heapEndMaxForRetail : 0x023FF000) : heapEnd;
+	const u32 heapEndMaxForRetail32 = maxHeapOpen ? 0x023FF000 : heapEnd;
+	const u32 heapEndMaxForRetailMus = maxHeapOpen ? heapEndMaxForRetail-0x4000 : heapEnd;
 	const u32 heapEnd_512KBFreeForDebug = extendedMemory ? 0x02740000 : heapEnd;
 	// const u32 heapEnd_512KBFreeForDebugAlt = extendedMemory ? 0x02700000 : heapEnd;
 	const u32 heapEndMaxForRetail_512KBFreeForDebugAlt = extendedMemory ? 0x02700000 : heapEndMaxForRetail;
+	const u32 heapEndMaxForRetail2_512KBFreeForDebugAlt = extendedMemory ? 0x02700000 : heapEndMaxForRetail2;
 	const bool debugOrMep = (extendedMemory || expansionPakFound);
 	const bool largeS2RAM = (expansionPakFound && (s2FlashcardId != 0)); // 16MB or more
 	const u32 wirelessReturnCodeArm = wirelessCodeInVram ? 0xE3A00000 : 0xE3A00001; // mov r0, #wirelessCodeInVram ? 0 : 1
@@ -101,9 +112,61 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	// Patch DSi-Exclusives to run in DS mode
 
+#ifdef LOADERTYPE0
+	// Foto Showdown (USA)
+	if (strcmp(romTid, "DMFE") == 0) {
+		*(u32*)0x0200EE34 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02011784 = 0xE1A00000; // nop
+		*(u32*)0x02014B1C = 0xE1A00000; // nop
+		patchInitDSiWare(0x0201C4FC, heapEnd);
+		*(u32*)0x0201C86C = *(u32*)0x02004FD0;
+		*(u32*)0x0201D698 = 0xE12FFF1E; // bx lr (Disable changing SCFG_CLK)
+		*(u32*)0x0201D7A8 = wirelessReturnCodeArm;
+		*(u32*)0x0201D7AC = 0xE12FFF1E; // bx lr
+		*(u32*)0x0201D7B4 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0201D7B8 = 0xE12FFF1E; // bx lr
+		if (!extendedMemory) {
+			*(u32*)0x0202048C = 0xE12FFF1E; // bx lr
+		}
+		*(u32*)0x020475BC = 0xE1A00000; // nop
+		*(u32*)0x020475C0 = 0xE1A00000; // nop
+		setBL(0x0204D3AC, (int)ce9->patches->musicStopEffect); // Update video frame
+		*(u32*)0x0204D3F4 = 0xE3A00001; // mov r0, #1 (Disable shutter sound playback)
+		*(u32*)0x0204D518 = 0xE3A00002; // mov r0, #2 (Skip camera check after A button press)
+		setBL(0x020537F8, (int)ce9->patches->musicPlay); // Start video
+		*(u32*)0x020539F4 = 0xE1A00000; // nop
+		*(u32*)0x02053CF4 = 0xE12FFF1E; // bx lr
+	}
+
+	// Monster Finder (Japan)
+	else if (strcmp(romTid, "DMFJ") == 0) {
+		*(u32*)0x0200EE38 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02011788 = 0xE1A00000; // nop
+		*(u32*)0x02014B20 = 0xE1A00000; // nop
+		*(u32*)0x0201C504 = 0xE1A00000; // nop
+		patchInitDSiWare(0x0201C510, heapEnd);
+		*(u32*)0x0201C880 = *(u32*)0x02004FD0;
+		*(u32*)0x0201D6AC = 0xE12FFF1E; // bx lr (Disable changing SCFG_CLK)
+		*(u32*)0x0201D7BC = wirelessReturnCodeArm;
+		*(u32*)0x0201D7C0 = 0xE12FFF1E; // bx lr
+		*(u32*)0x0201D7C8 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0201D7CC = 0xE12FFF1E; // bx lr
+		if (!extendedMemory) {
+			*(u32*)0x020204C0 = 0xE12FFF1E; // bx lr
+		}
+		*(u32*)0x020472D4 = 0xE1A00000; // nop
+		*(u32*)0x020472D8 = 0xE1A00000; // nop
+		setBL(0x0204D0C4, (int)ce9->patches->musicStopEffect); // Update video frame
+		*(u32*)0x0204D10C = 0xE3A00001; // mov r0, #1 (Disable shutter sound playback)
+		*(u32*)0x0204D230 = 0xE3A00002; // mov r0, #2 (Skip camera check after A button press)
+		setBL(0x02053500, (int)ce9->patches->musicPlay); // Start video
+		*(u32*)0x020536FC = 0xE1A00000; // nop
+		*(u32*)0x020539FC = 0xE12FFF1E; // bx lr
+	}
+
 	// Nintendo DSi XL Demo Video (USA)
 	// Requires 8MB of RAM
-	if (strcmp(romTid, "DMEE") == 0 && extendedMemory) {
+	else if (strcmp(romTid, "DMEE") == 0 && extendedMemory) {
 		// *(u32*)0x02004B9C = 0x0200002F;
 		*(u32*)0x02008DD8 = 0xE1A00000; // nop
 		*(u32*)0x02008EF4 = 0xE1A00000; // nop
@@ -172,12 +235,36 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02072984 += 0xE0000000; // beq -> b
 	}
 
+	// System FLAW (USA)
+	// Requires 8MB of RAM
+	else if (strcmp(romTid, "DSYE") == 0 && extendedMemory) {
+		*(u32*)0x0200D0A0 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0200F964 = 0xE1A00000; // nop
+		*(u32*)0x02012A90 = 0xE1A00000; // nop
+		patchInitDSiWare(0x02018070, heapEnd);
+		*(u32*)0x020183E0 = *(u32*)0x020510B4;
+		setBL(0x0201DA1C, (int)ce9->patches->musicPlay); // Play video
+		/* *(u32*)0x02023320 = 0xE12FFF1E; // bx lr (Disable music)
+		*(u32*)0x020234F0 = 0xE12FFF1E; // bx lr (Disable sound)
+		*(u32*)0x02023614 = 0xE12FFF1E; // bx lr (Disable sound) */
+	}
+
+	// System FLAW (Europe)
+	// Requires 8MB of RAM
+	else if (strcmp(romTid, "DSYP") == 0 && extendedMemory) {
+		*(u32*)0x0200D0F4 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0200F9B8 = 0xE1A00000; // nop
+		*(u32*)0x02012AE4 = 0xE1A00000; // nop
+		patchInitDSiWare(0x020180C4, heapEnd);
+		*(u32*)0x02018434 = *(u32*)0x020510C8;
+		setBL(0x0201DA70, (int)ce9->patches->musicPlay); // Play video
+	}
+
 	// Patch DSiWare to run in DS mode
 
-#ifndef LOADERTWO
 	// 1st Class Poker & BlackJack (USA)
 	else if (strcmp(romTid, "KYPE") == 0) {
-		setBL(0x02012E50, (u32)dsiSaveOpen);
+		/* setBL(0x02012E50, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x02012EC4, (u32)dsiSaveGetLength);
 		setBL(0x02012ED8, (u32)dsiSaveClose);
 		setBL(0x02012EF8, (u32)dsiSaveSeek);
@@ -194,13 +281,13 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02013184, (u32)dsiSaveSeek);
 		setBL(0x0201319C, (u32)dsiSaveWrite);
 		setBL(0x020131B0, (u32)dsiSaveClose);
-		setBL(0x020131FC, (u32)dsiSaveClose);
+		setBL(0x020131FC, (u32)dsiSaveClose); */
 		*(u32*)0x0204A92C = 0xE3A00001; // mov r0, #1 (Enable NitroFS reads)
 	}
 
 	// 1st Class Poker & BlackJack (Europe)
 	else if (strcmp(romTid, "KYPP") == 0) {
-		setBL(0x02012E40, (u32)dsiSaveOpen);
+		/* setBL(0x02012E40, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x02012EB4, (u32)dsiSaveGetLength);
 		setBL(0x02012EC8, (u32)dsiSaveClose);
 		setBL(0x02012EE8, (u32)dsiSaveSeek);
@@ -217,7 +304,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02013174, (u32)dsiSaveSeek);
 		setBL(0x0201318C, (u32)dsiSaveWrite);
 		setBL(0x020131A0, (u32)dsiSaveClose);
-		setBL(0x020131EC, (u32)dsiSaveClose);
+		setBL(0x020131EC, (u32)dsiSaveClose); */
 		*(u32*)0x0204A920 = 0xE3A00001; // mov r0, #1 (Enable NitroFS reads)
 	}
 
@@ -267,7 +354,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	// 10 Byou Sou (Japan)
 	else if (strcmp(romTid, "KJUJ") == 0) {
-		*(u32*)0x02014628 = 0xE12FFF1E; // bx lr
+		// *(u32*)0x02014628 = 0xE12FFF1E; // bx lr // Part of .pck file
 		*(u32*)0x02014DC0 = 0xE1A00000; // nop
 		*(u32*)0x02014DD0 = 0xE1A00000; // nop
 		*(u32*)0x02014DDC = 0xE1A00000; // nop
@@ -310,7 +397,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		/* *(u32*)0x020B7B0C = 0xE3A00001; // mov r0, #1
 		*(u32*)0x020B7B30 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x020B7B54 = 0xE3A00001; // mov r0, #1 */
-		setBL(0x020C6788, (u32)dsiSaveOpen);
+		/* setBL(0x020C6788, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x020C67B8, (u32)dsiSaveRead);
 		setBL(0x020C67C0, (u32)dsiSaveClose);
 		setBL(0x020C6890, (u32)dsiSaveOpen);
@@ -355,7 +442,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x020C70C8, (u32)dsiSaveOpen);
 		setBL(0x020C70E4, (u32)dsiSaveSetLength);
 		setBL(0x020C70F4, (u32)dsiSaveWrite);
-		setBL(0x020C70FC, (u32)dsiSaveClose);
+		setBL(0x020C70FC, (u32)dsiSaveClose); */
 	}
 
 	// 101 Pinball World (Europe)
@@ -377,7 +464,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		/* *(u32*)0x020B0888 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x020B08AC = 0xE3A00001; // mov r0, #1
 		*(u32*)0x020B08D0 = 0xE3A00001; // mov r0, #1 */
-		setBL(0x020BC4D0, (u32)dsiSaveOpen);
+		/* setBL(0x020BC4D0, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x020BC500, (u32)dsiSaveRead);
 		setBL(0x020BC508, (u32)dsiSaveClose);
 		setBL(0x020BC5D8, (u32)dsiSaveOpen);
@@ -406,7 +493,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x020BCA60, (u32)dsiSaveOpen);
 		setBL(0x020BCA7C, (u32)dsiSaveSetLength);
 		setBL(0x020BCA8C, (u32)dsiSaveWrite);
-		setBL(0x020BCA94, (u32)dsiSaveClose);
+		setBL(0x020BCA94, (u32)dsiSaveClose); */
 	}
 
 	// 18th Gate (USA)
@@ -431,7 +518,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		patchInitDSiWare(0x020163C0, heapEnd);
 		// *(u32*)0x0201674C = *(u32*)0x02004FE8;
 		patchUserSettingsReadDSiWare(0x020178D0);
-		if (romTid[3] == 'E') {
+		// if (romTid[3] == 'E') {
 			/* if (!extendedMemory) {
 				if (s2FlashcardId == 0x5A45) {
 					gate18HeapAddrPtr[0] -= 0x01000000;
@@ -447,7 +534,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			if (!extendedMemory) {
 				*(u32*)0x020CB630 = 0xE3A01812; // mov r1, #0x120000
 			} */
-			setBL(0x020D172C, (u32)dsiSaveGetInfo);
+			/* setBL(0x020D172C, (u32)dsiSaveGetInfo); // Part of .pck file
 			setBL(0x020D1740, (u32)dsiSaveOpen);
 			setBL(0x020D1754, (u32)dsiSaveCreate);
 			setBL(0x020D1764, (u32)dsiSaveOpen);
@@ -471,12 +558,12 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x020D1BF4, (u32)dsiSaveOpen);
 			setBL(0x020D1C08, (u32)dsiSaveSeek);
 			setBL(0x020D1C18, (u32)dsiSaveWrite);
-			setBL(0x020D1C20, (u32)dsiSaveClose);
-		} else {
+			setBL(0x020D1C20, (u32)dsiSaveClose); */
+		// } else {
 			/* if (!extendedMemory) {
 				*(u32*)0x020996FC = 0xE3A01812; // mov r1, #0x120000
 			} */
-			setBL(0x0209F7F8, (u32)dsiSaveGetInfo);
+			/* setBL(0x0209F7F8, (u32)dsiSaveGetInfo); // Part of .pck file
 			setBL(0x0209F80C, (u32)dsiSaveOpen);
 			setBL(0x0209F820, (u32)dsiSaveCreate);
 			setBL(0x0209F830, (u32)dsiSaveOpen);
@@ -500,15 +587,15 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x0209FCC0, (u32)dsiSaveOpen);
 			setBL(0x0209FCD4, (u32)dsiSaveSeek);
 			setBL(0x0209FCE4, (u32)dsiSaveWrite);
-			setBL(0x0209FCEC, (u32)dsiSaveClose);
-		}
+			setBL(0x0209FCEC, (u32)dsiSaveClose); */
+		// }
 	}
 
 	// 1001 Crystal Mazes Collection (USA)
 	else if (strcmp(romTid, "KOKE") == 0) {
 		*(u32*)0x0200C294 = 0xE1A00000; // nop
 		*(u32*)0x0200C29C = 0xE1A00000; // nop
-		setBL(0x0200C78C, (u32)dsiSaveOpen);
+		/* setBL(0x0200C78C, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200C7A0, (u32)dsiSaveClose);
 		setBL(0x0200C7C0, (u32)dsiSaveCreate);
 		setBL(0x0200C7D8, (u32)dsiSaveOpen);
@@ -530,7 +617,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200CA98, (u32)dsiSaveGetResultCode);
 		setBL(0x0200CAB0, (u32)dsiSaveSetLength);
 		setBL(0x0200CAC0, (u32)dsiSaveWrite);
-		setBL(0x0200CAC8, (u32)dsiSaveClose);
+		setBL(0x0200CAC8, (u32)dsiSaveClose); */
 		if (!extendedMemory) {
 			*(u32*)0x0200E250 = 0xE12FFF1E; // bx lr (Disable loading .xm music files)
 		}
@@ -548,7 +635,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	else if (strcmp(romTid, "KOKP") == 0) {
 		*(u32*)0x0200C22C = 0xE1A00000; // nop
 		*(u32*)0x0200C234 = 0xE1A00000; // nop
-		setBL(0x0200C734, (u32)dsiSaveOpen);
+		/* setBL(0x0200C734, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200C748, (u32)dsiSaveClose);
 		setBL(0x0200C768, (u32)dsiSaveCreate);
 		setBL(0x0200C784, (u32)dsiSaveOpen);
@@ -570,7 +657,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200CA68, (u32)dsiSaveGetResultCode);
 		setBL(0x0200CA84, (u32)dsiSaveSetLength);
 		setBL(0x0200CA94, (u32)dsiSaveWrite);
-		setBL(0x0200CA9C, (u32)dsiSaveClose);
+		setBL(0x0200CA9C, (u32)dsiSaveClose); */
 		*(u32*)0x0200CAAC = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		if (!extendedMemory) {
 			*(u32*)0x0200E08C = 0xE12FFF1E; // bx lr (Disable loading .xm music files)
@@ -605,7 +692,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02025DE4 = 0xE3A00001; // mov r0, #1
 		patchInitDSiWare(0x02025DFC, heapEnd);
 		*(u32*)0x0202EA3C = 0xE3A00001; // mov r0, #1
-		*(u32*)0x02075390 = 0xE3A0000B; // mov r0, #0xB
+		/* *(u32*)0x02075390 = 0xE3A0000B; // mov r0, #0xB // Part of .pck file
 		*(u32*)0x02075FFC = 0xE3A00001; // mov r0, #1 (dsiSaveOpenDir)
 		*(u32*)0x02076018 = 0xE3A00001; // mov r0, #1 (dsiSaveReadDir)
 		*(u32*)0x02076244 = 0xE3A00000; // mov r0, #0 (dsiSaveReadDir)
@@ -621,7 +708,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02076440, (u32)dsiSaveGetResultCode);
 		setBL(0x02076474, (u32)dsiSaveSetLength);
 		setBL(0x020764A4, (u32)dsiSaveWrite);
-		setBL(0x020764AC, (u32)dsiSaveClose);
+		setBL(0x020764AC, (u32)dsiSaveClose); */
 
 		toncset((char*)0x020A05F4, 0, 9); // Redirect otherPrv to dataPrv
 		tonccpy((char*)0x020A05F4, dataPrv, strlen(dataPrv));
@@ -689,7 +776,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	else if (strcmp(romTid, "K4IE") == 0) {
 		*(u32*)0x02008918 = 0xE1A00000; // nop
 		*(u32*)0x0200B6C4 = 0xE3A00001; // mov r0, #1
-		setBL(0x0200E83C, (u32)dsiSaveOpen);
+		/* setBL(0x0200E83C, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200E8B0, (u32)dsiSaveGetLength);
 		setBL(0x0200E8C4, (u32)dsiSaveClose);
 		setBL(0x0200E8E4, (u32)dsiSaveSeek);
@@ -706,7 +793,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200EB60, (u32)dsiSaveSeek);
 		setBL(0x0200EB78, (u32)dsiSaveWrite);
 		setBL(0x0200EB8C, (u32)dsiSaveClose);
-		setBL(0x0200EBD8, (u32)dsiSaveClose);
+		setBL(0x0200EBD8, (u32)dsiSaveClose); */
 		*(u32*)0x020359EC = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		*(u32*)0x020709F8 = 0xE1A00000; // nop
 		*(u32*)0x02073E8C = 0xE1A00000; // nop
@@ -718,7 +805,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	else if (strcmp(romTid, "K4IP") == 0) {
 		*(u32*)0x020088C0 = 0xE1A00000; // nop
 		*(u32*)0x0200B558 = 0xE3A00001; // mov r0, #1
-		setBL(0x0200E6D0, (u32)dsiSaveOpen);
+		/* setBL(0x0200E6D0, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200E744, (u32)dsiSaveGetLength);
 		setBL(0x0200E758, (u32)dsiSaveClose);
 		setBL(0x0200E778, (u32)dsiSaveSeek);
@@ -735,7 +822,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200E9F4, (u32)dsiSaveSeek);
 		setBL(0x0200EA0C, (u32)dsiSaveWrite);
 		setBL(0x0200EA20, (u32)dsiSaveClose);
-		setBL(0x0200EA6C, (u32)dsiSaveClose);
+		setBL(0x0200EA6C, (u32)dsiSaveClose); */
 		*(u32*)0x02035880 = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		*(u32*)0x020705D4 = 0xE1A00000; // nop
 		*(u32*)0x02073A68 = 0xE1A00000; // nop
@@ -747,7 +834,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	else if (strcmp(romTid, "K4IJ") == 0) {
 		*(u32*)0x020088B8 = 0xE1A00000; // nop
 		*(u32*)0x0200B650 = 0xE3A00001; // mov r0, #1
-		setBL(0x0200E7C4, (u32)dsiSaveOpen);
+		/* setBL(0x0200E7C4, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200E838, (u32)dsiSaveGetLength);
 		setBL(0x0200E84C, (u32)dsiSaveClose);
 		setBL(0x0200E86C, (u32)dsiSaveSeek);
@@ -764,7 +851,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200EAE8, (u32)dsiSaveSeek);
 		setBL(0x0200EB00, (u32)dsiSaveWrite);
 		setBL(0x0200EB14, (u32)dsiSaveClose);
-		setBL(0x0200EB60, (u32)dsiSaveClose);
+		setBL(0x0200EB60, (u32)dsiSaveClose); */
 		*(u32*)0x02035654 = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		*(u32*)0x02070108 = 0xE1A00000; // nop
 		*(u32*)0x02073630 = 0xE1A00000; // nop
@@ -792,7 +879,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x020089C0 = 0xE1A00000; // nop
 		*(u32*)0x020093D8 = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		*(u32*)0x02009DC4 = 0xE3A00001; // mov r0, #1
-		setBL(0x0200DA0C, (u32)dsiSaveOpen);
+		/* setBL(0x0200DA0C, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200DA80, (u32)dsiSaveGetLength);
 		setBL(0x0200DA94, (u32)dsiSaveClose);
 		setBL(0x0200DAB4, (u32)dsiSaveSeek);
@@ -809,7 +896,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200DD30, (u32)dsiSaveSeek);
 		setBL(0x0200DD48, (u32)dsiSaveWrite);
 		setBL(0x0200DD5C, (u32)dsiSaveClose);
-		setBL(0x0200DDA8, (u32)dsiSaveClose);
+		setBL(0x0200DDA8, (u32)dsiSaveClose); */
 		*(u32*)0x0205F8E0 = 0xE1A00000; // nop
 		*(u32*)0x02062D74 = 0xE1A00000; // nop
 		patchInitDSiWare(0x0206B048, heapEnd);
@@ -821,7 +908,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02008964 = 0xE1A00000; // nop
 		*(u32*)0x0200937C = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		*(u32*)0x02009D68 = 0xE3A00001; // mov r0, #1
-		setBL(0x0200D9B0, (u32)dsiSaveOpen);
+		/* setBL(0x0200D9B0, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200DA24, (u32)dsiSaveGetLength);
 		setBL(0x0200DA38, (u32)dsiSaveClose);
 		setBL(0x0200DA58, (u32)dsiSaveSeek);
@@ -838,7 +925,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200DCD4, (u32)dsiSaveSeek);
 		setBL(0x0200DCEC, (u32)dsiSaveWrite);
 		setBL(0x0200DD00, (u32)dsiSaveClose);
-		setBL(0x0200DD4C, (u32)dsiSaveClose);
+		setBL(0x0200DD4C, (u32)dsiSaveClose); */
 		*(u32*)0x0205F488 = 0xE1A00000; // nop
 		*(u32*)0x0206291C = 0xE1A00000; // nop
 		patchInitDSiWare(0x0206A920, heapEnd);
@@ -897,8 +984,8 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200E7E8 = 0xE1A00000; // nop
 		patchInitDSiWare(0x02013DB4, heapEnd);
 		patchUserSettingsReadDSiWare(0x020152C4);
-		if (romTid[3] == 'E') {
-			setBL(0x02027A28, (u32)dsiSaveGetInfo);
+		/* if (romTid[3] == 'E') {
+			setBL(0x02027A28, (u32)dsiSaveGetInfo); // Part of .pck file
 			setBL(0x02027A3C, (u32)dsiSaveOpen);
 			setBL(0x02027A50, (u32)dsiSaveCreate);
 			setBL(0x02027A60, (u32)dsiSaveOpen);
@@ -924,7 +1011,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x02027D04, (u32)dsiSaveWrite);
 			setBL(0x02027D0C, (u32)dsiSaveClose);
 		} else {
-			setBL(0x020314EC, (u32)dsiSaveGetInfo);
+			setBL(0x020314EC, (u32)dsiSaveGetInfo); // Part of .pck file
 			setBL(0x02031500, (u32)dsiSaveOpen);
 			setBL(0x02031514, (u32)dsiSaveCreate);
 			setBL(0x02031524, (u32)dsiSaveOpen);
@@ -949,7 +1036,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x020317B8, (u32)dsiSaveSeek);
 			setBL(0x020317C8, (u32)dsiSaveWrite);
 			setBL(0x020317D0, (u32)dsiSaveClose);
-		}
+		} */
 	}
 
 	// 3 Heroes: Crystal Soul (Japan)
@@ -961,7 +1048,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200E7E8 = 0xE1A00000; // nop
 		patchInitDSiWare(0x02013FE8, heapEnd);
 		patchUserSettingsReadDSiWare(0x020154F8);
-		setBL(0x0203DDD8, (u32)dsiSaveGetInfo);
+		/* setBL(0x0203DDD8, (u32)dsiSaveGetInfo); // Part of .pck file
 		setBL(0x0203DDEC, (u32)dsiSaveOpen);
 		setBL(0x0203DE00, (u32)dsiSaveCreate);
 		setBL(0x0203DE10, (u32)dsiSaveOpen);
@@ -985,7 +1072,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0203E090, (u32)dsiSaveOpen);
 		setBL(0x0203E0A4, (u32)dsiSaveSeek);
 		setBL(0x0203E0B4, (u32)dsiSaveWrite);
-		setBL(0x0203E0BC, (u32)dsiSaveClose);
+		setBL(0x0203E0BC, (u32)dsiSaveClose); */
 	}
 
 	// 3 Punten Katou Itsu: Bakumatsu Kuizu He (Japan)
@@ -999,7 +1086,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02024A2C = 0xE3A00603; // mov r0, 0x300000
 		*(u32*)0x02024DCC -= 0x220000;
 		*(u32*)0x0202FAC8 -= 0x220000;
-		setBL(0x0202E680, (u32)dsiSaveOpen);
+		/* setBL(0x0202E680, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0202E6A8, (u32)dsiSaveRead);
 		setBL(0x0202E6C0, (u32)dsiSaveClose);
 		setBL(0x0202E708, (u32)dsiSaveCreate);
@@ -1011,7 +1098,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0202E7F8, (u32)dsiSaveSetLength);
 		setBL(0x0202E818, (u32)dsiSaveWrite);
 		setBL(0x0202E830, (u32)dsiSaveClose);
-		setBL(0x0202E880, (u32)dsiSaveClose);
+		setBL(0x0202E880, (u32)dsiSaveClose); */
 	}
 
 	// 3 Punten Katou Itsu: Higashi Nihon Sengoku Kuizu He (Japan)
@@ -1026,7 +1113,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02025228 = 0xE3A00603; // mov r0, 0x300000
 		*(u32*)0x020255C8 -= 0x220000;
 		*(u32*)0x020301F4 -= 0x220000;
-		setBL(0x0202EEAC, (u32)dsiSaveOpen);
+		/* setBL(0x0202EEAC, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0202EED4, (u32)dsiSaveRead);
 		setBL(0x0202EEEC, (u32)dsiSaveClose);
 		setBL(0x0202EF34, (u32)dsiSaveCreate);
@@ -1038,7 +1125,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0202F024, (u32)dsiSaveSetLength);
 		setBL(0x0202F044, (u32)dsiSaveWrite);
 		setBL(0x0202F05C, (u32)dsiSaveClose);
-		setBL(0x0202F0AC, (u32)dsiSaveClose);
+		setBL(0x0202F0AC, (u32)dsiSaveClose); */
 	}
 
 	// 3450 Algo (Japan)
@@ -1051,7 +1138,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		if (useSharedFont && !extendedMemory) {
 			patchTwlFontLoad(0x0203CD28, 0x0201DDE8);
 		}
-		setBL(0x02041D54, (u32)dsiSaveOpen);
+		/* setBL(0x02041D54, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x02041D6C, (u32)dsiSaveGetLength);
 		setBL(0x02041D98, (u32)dsiSaveRead);
 		setBL(0x02041DA0, (u32)dsiSaveClose);
@@ -1062,12 +1149,12 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02041E20, (u32)dsiSaveSetLength);
 		setBL(0x02041E30, (u32)dsiSaveWrite);
 		setBL(0x02041E38, (u32)dsiSaveClose);
-		*(u32*)0x02086F54 = 0xE3A00001; // mov r0, #1 (dsiSaveOpenDir)
+		*(u32*)0x02086F54 = 0xE3A00001; // mov r0, #1 (dsiSaveOpenDir) */
 	}
 
 	// 4 Elements (USA)
 	else if (strcmp(romTid, "K7AE") == 0) {
-		setBL(0x0207B9E8, (u32)dsiSaveGetLength);
+		/* setBL(0x0207B9E8, (u32)dsiSaveGetLength); // Part of .pck file
 		setBL(0x0207B9FC, (u32)dsiSaveSetLength);
 		setBL(0x0207BA10, (u32)dsiSaveSeek);
 		setBL(0x0207BA20, (u32)dsiSaveWrite);
@@ -1080,7 +1167,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0207BBD8, (u32)dsiSaveOpen);
 		setBL(0x0207BC2C, (u32)dsiSaveCreate);
 		setBL(0x0207BC4C, (u32)dsiSaveGetResultCode);
-		*(u32*)0x0207BC84 = 0xE3A00001; // mov r0, #1
+		*(u32*)0x0207BC84 = 0xE3A00001; // mov r0, #1 */
 		*(u32*)0x0207C298 = 0xE3A05703; // mov r5, #0xC0000
 		*(u32*)0x0207C760 = 0xE1A00000; // nop (Disable NFTR loading from TWLNAND)
 		*(u32*)0x02087F64 = 0xE3A00602; // mov r0, #0x200000
@@ -1095,7 +1182,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	// 4 Elements (Europe, Australia)
 	else if (strcmp(romTid, "K7AV") == 0) {
-		setBL(0x0207BA30, (u32)dsiSaveGetLength);
+		/* setBL(0x0207BA30, (u32)dsiSaveGetLength); // Part of .pck file
 		setBL(0x0207BA44, (u32)dsiSaveSetLength);
 		setBL(0x0207BA58, (u32)dsiSaveSeek);
 		setBL(0x0207BA68, (u32)dsiSaveWrite);
@@ -1108,7 +1195,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0207BC20, (u32)dsiSaveOpen);
 		setBL(0x0207BC74, (u32)dsiSaveCreate);
 		setBL(0x0207BC94, (u32)dsiSaveGetResultCode);
-		*(u32*)0x0207BCCC = 0xE3A00001; // mov r0, #1
+		*(u32*)0x0207BCCC = 0xE3A00001; // mov r0, #1 */
 		*(u32*)0x0207C2E0 = 0xE3A05703; // mov r5, #0xC0000
 		*(u32*)0x0207C7A8 = 0xE1A00000; // nop (Disable NFTR loading from TWLNAND)
 		*(u32*)0x02087FE4 = 0xE3A00602; // mov r0, #0x200000
@@ -1132,7 +1219,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		patchInitDSiWare(0x0201AF40, heapEnd);
 		*(u32*)0x0203954C = 0xE1A00000; // nop
 		*(u32*)0x02039550 = 0xE1A00000; // nop
-		setBL(0x0205086C, (u32)dsiSaveCreate);
+		/* setBL(0x0205086C, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x02050880, (u32)dsiSaveCreate);
 		setBL(0x0205089C, (u32)dsiSaveGetResultCode);
 		setBL(0x02050930, (u32)dsiSaveOpen);
@@ -1170,7 +1257,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02052874, (u32)dsiSaveCreate);
 		setBL(0x02052880, (u32)dsiSaveCreate);
 		*(u32*)0x020528B4 = 0xE1A00000; // nop
-		*(u32*)0x020528C8 = 0xE1A00000; // nop
+		*(u32*)0x020528C8 = 0xE1A00000; // nop */
 	}
 
 	// 4 Travellers: Play French (Europe)
@@ -1186,7 +1273,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		if (romTid[3] == 'P') {
 			*(u32*)0x02025248 = 0xE1A00000; // nop
 			*(u32*)0x0202524C = 0xE1A00000; // nop
-			setBL(0x02040298, (u32)dsiSaveCreate);
+			/* setBL(0x02040298, (u32)dsiSaveCreate); // Part of .pck file
 			setBL(0x020402AC, (u32)dsiSaveCreate);
 			setBL(0x020402C8, (u32)dsiSaveGetResultCode);
 			setBL(0x0204035C, (u32)dsiSaveOpen);
@@ -1224,11 +1311,11 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x020422A0, (u32)dsiSaveCreate);
 			setBL(0x020422AC, (u32)dsiSaveCreate);
 			*(u32*)0x020422E0 = 0xE1A00000; // nop
-			*(u32*)0x020422F4 = 0xE1A00000; // nop
+			*(u32*)0x020422F4 = 0xE1A00000; // nop */
 		} else {
 			*(u32*)0x020394A4 = 0xE1A00000; // nop
 			*(u32*)0x020394A8 = 0xE1A00000; // nop
-			setBL(0x02050B18, (u32)dsiSaveCreate);
+			/* setBL(0x02050B18, (u32)dsiSaveCreate); // Part of .pck file
 			setBL(0x02050B2C, (u32)dsiSaveCreate);
 			setBL(0x02050B48, (u32)dsiSaveGetResultCode);
 			setBL(0x02050BDC, (u32)dsiSaveOpen);
@@ -1266,7 +1353,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x02052B20, (u32)dsiSaveCreate);
 			setBL(0x02052B2C, (u32)dsiSaveCreate);
 			*(u32*)0x02052B60 = 0xE1A00000; // nop
-			*(u32*)0x02052B74 = 0xE1A00000; // nop
+			*(u32*)0x02052B74 = 0xE1A00000; // nop */
 		}
 	}
 
@@ -1281,7 +1368,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		patchInitDSiWare(0x0201AE08, heapEnd);
 		*(u32*)0x02025094 = 0xE1A00000; // nop
 		*(u32*)0x02025098 = 0xE1A00000; // nop
-		setBL(0x02050E8C, (u32)dsiSaveCreate);
+		/* setBL(0x02050E8C, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x02050EA0, (u32)dsiSaveCreate);
 		setBL(0x02050EBC, (u32)dsiSaveGetResultCode);
 		setBL(0x02050F50, (u32)dsiSaveOpen);
@@ -1319,13 +1406,13 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02052E80, (u32)dsiSaveCreate);
 		setBL(0x02052E8C, (u32)dsiSaveCreate);
 		*(u32*)0x02052EC0 = 0xE1A00000; // nop
-		*(u32*)0x02052ED4 = 0xE1A00000; // nop
+		*(u32*)0x02052ED4 = 0xE1A00000; // nop */
 	}
 
 	// 4 Travellers: Play Spanish (Europe)
 	// 4 Travellers: Play Spanish (Australia)
 	else if (strcmp(romTid, "KTSP") == 0 || strcmp(romTid, "KTSU") == 0) {
-		u32 offsetChange = (romTid[3] == 'U') ? 0x4C : 0;
+		// u32 offsetChange = (romTid[3] == 'U') ? 0x4C : 0;
 
 		useSharedFont = twlFontFound;
 		if (!twlFontFound) {
@@ -1336,7 +1423,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		patchInitDSiWare(0x0201ADBC, heapEnd);
 		*(u32*)0x02025038 = 0xE1A00000; // nop
 		*(u32*)0x0202503C = 0xE1A00000; // nop
-		setBL(0x020511A4-offsetChange, (u32)dsiSaveCreate);
+		/* setBL(0x020511A4-offsetChange, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x020511B8-offsetChange, (u32)dsiSaveCreate);
 		setBL(0x020511D4-offsetChange, (u32)dsiSaveGetResultCode);
 		setBL(0x02051268-offsetChange, (u32)dsiSaveOpen);
@@ -1374,7 +1461,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x020531AC-offsetChange, (u32)dsiSaveCreate);
 		setBL(0x020531B8-offsetChange, (u32)dsiSaveCreate);
 		*(u32*)(0x020531EC-offsetChange) = 0xE1A00000; // nop
-		*(u32*)(0x02053200-offsetChange) = 0xE1A00000; // nop
+		*(u32*)(0x02053200-offsetChange) = 0xE1A00000; // nop */
 	}
 
 	// 40-in-1: Explosive Megamix (USA)
@@ -1389,7 +1476,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200E54C = 0xE3A00001; // mov r0, #1
 		*(u32*)0x0200E550 = 0xE12FFF1E; // bx lr */
 		// *(u32*)0x0200E010 = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
-		setBL(0x0200E0D4, (u32)dsiSaveCreate);
+		/* setBL(0x0200E0D4, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x0200E0E4, (u32)dsiSaveOpen);
 		setBL(0x0200E11C, (u32)dsiSaveSetLength);
 		setBL(0x0200E138, (u32)dsiSaveWrite);
@@ -1402,9 +1489,9 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200E470 = 0xE3A00001; // mov r0, #1
 		setBL(0x0200E494, 0x0200E4D4);
 		*(u32*)0x0200E4F8 = 0xE3A00001; // mov r0, #1
-		*(u32*)0x0200E578 = 0xE3A00001; // mov r0, #1
+		*(u32*)0x0200E578 = 0xE3A00001; // mov r0, #1 */
 		*(u32*)0x020FD244 = 0xE1A00000; // nop
-		tonccpy((u32*)0x020FDDC8, dsiSaveGetResultCode, 0xC);
+		// tonccpy((u32*)0x020FDDC8, dsiSaveGetResultCode, 0xC);
 		*(u32*)0x021008F8 = 0xE1A00000; // nop
 		patchInitDSiWare(0x021059B0, heapEnd);
 		patchUserSettingsReadDSiWare(0x021070C0);
@@ -1431,7 +1518,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200E4FC = 0xE3A00001; // mov r0, #1
 		*(u32*)0x0200E500 = 0xE12FFF1E; // bx lr */
 		// *(u32*)0x0200DFC0 = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
-		setBL(0x0200E084, (u32)dsiSaveCreate);
+		/* setBL(0x0200E084, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x0200E094, (u32)dsiSaveOpen);
 		setBL(0x0200E0CC, (u32)dsiSaveSetLength);
 		setBL(0x0200E0E8, (u32)dsiSaveWrite);
@@ -1444,9 +1531,9 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200E420 = 0xE3A00001; // mov r0, #1
 		setBL(0x0200E444, 0x0200E484);
 		*(u32*)0x0200E4A8 = 0xE3A00001; // mov r0, #1
-		*(u32*)0x0200E528 = 0xE3A00001; // mov r0, #1
+		*(u32*)0x0200E528 = 0xE3A00001; // mov r0, #1 */
 		*(u32*)0x020FC8B4 = 0xE1A00000; // nop
-		tonccpy((u32*)0x020FD438, dsiSaveGetResultCode, 0xC);
+		// tonccpy((u32*)0x020FD438, dsiSaveGetResultCode, 0xC);
 		*(u32*)0x020FFF68 = 0xE1A00000; // nop
 		patchInitDSiWare(0x02105020, heapEnd);
 		patchUserSettingsReadDSiWare(0x02106730);
@@ -1465,12 +1552,12 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	// 5 in 1 Mahjong (Europe)
 	else if (strcmp(romTid, "KRJE") == 0 || strcmp(romTid, "KRJP") == 0) {
 		*(u32*)0x02012514 = 0xE1A00000; // nop
-		tonccpy((u32*)0x02013098, dsiSaveGetResultCode, 0xC);
+		// tonccpy((u32*)0x02013098, dsiSaveGetResultCode, 0xC);
 		*(u32*)0x02015FD8 = 0xE1A00000; // nop
 		patchInitDSiWare(0x0201CBE4, heapEnd);
 		patchUserSettingsReadDSiWare(0x0201E2C4);
 		*(u32*)0x020235D0 = 0xE1A00000; // nop
-		setBL(0x02030C18, (u32)dsiSaveOpen);
+		/* setBL(0x02030C18, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x02030C28, (u32)dsiSaveClose);
 		*(u32*)0x02030CB8 = 0xE1A00000; // nop
 		setBL(0x0203104C, (u32)dsiSaveCreate); // dsiSaveCreateAuto
@@ -1482,7 +1569,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02031230, (u32)dsiSaveSeek);
 		setBL(0x02031248, (u32)dsiSaveRead);
 		setBL(0x020312D0, (u32)dsiSaveSeek);
-		setBL(0x020312E8, (u32)dsiSaveWrite);
+		setBL(0x020312E8, (u32)dsiSaveWrite); */
 		*(u32*)0x02056970 = 0xE12FFF1E; // bx lr (Skip Manual screen)
 	}
 
@@ -1537,7 +1624,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		} else {*/
 			*(u32*)0x0200E8C4 = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		// }
-		setBL(0x020100B8, (u32)dsiSaveOpen);
+		/* setBL(0x020100B8, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0201012C, (u32)dsiSaveGetLength);
 		setBL(0x02010140, (u32)dsiSaveClose);
 		setBL(0x02010160, (u32)dsiSaveSeek);
@@ -1554,7 +1641,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x020103DC, (u32)dsiSaveSeek);
 		setBL(0x020103F4, (u32)dsiSaveWrite);
 		setBL(0x02010408, (u32)dsiSaveClose);
-		setBL(0x02010454, (u32)dsiSaveClose);
+		setBL(0x02010454, (u32)dsiSaveClose); */
 		*(u32*)0x02059E8C = 0xE1A00000; // nop
 		*(u32*)0x0205D32C = 0xE1A00000; // nop
 		*(u32*)0x0205F120 = 0xE1A00000; // nop
@@ -1573,7 +1660,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		} else {*/
 			*(u32*)0x0200E6DC = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		// }
-		setBL(0x0200FED0, (u32)dsiSaveOpen);
+		/* setBL(0x0200FED0, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200FF44, (u32)dsiSaveGetLength);
 		setBL(0x0200FF58, (u32)dsiSaveClose);
 		setBL(0x0200FF78, (u32)dsiSaveSeek);
@@ -1590,7 +1677,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x020101F4, (u32)dsiSaveSeek);
 		setBL(0x0201020C, (u32)dsiSaveWrite);
 		setBL(0x02010220, (u32)dsiSaveClose);
-		setBL(0x0201026C, (u32)dsiSaveClose);
+		setBL(0x0201026C, (u32)dsiSaveClose); */
 		*(u32*)0x020599F4 = 0xE1A00000; // nop
 		*(u32*)0x0205CE94 = 0xE1A00000; // nop
 		*(u32*)0x0205EC88 = 0xE1A00000; // nop
@@ -1609,7 +1696,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		} else {*/
 			*(u32*)0x0200E064 = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		// }
-		setBL(0x0200F858, (u32)dsiSaveOpen);
+		/* setBL(0x0200F858, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x0200F8CC, (u32)dsiSaveGetLength);
 		setBL(0x0200F8E0, (u32)dsiSaveClose);
 		setBL(0x0200F900, (u32)dsiSaveSeek);
@@ -1626,7 +1713,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0200FB7C, (u32)dsiSaveSeek);
 		setBL(0x0200FB94, (u32)dsiSaveWrite);
 		setBL(0x0200FBA8, (u32)dsiSaveClose);
-		setBL(0x0200FBF4, (u32)dsiSaveClose);
+		setBL(0x0200FBF4, (u32)dsiSaveClose); */
 		*(u32*)0x02059334 = 0xE1A00000; // nop
 		*(u32*)0x0205C85C = 0xE1A00000; // nop
 		*(u32*)0x0205E680 = 0xE1A00000; // nop
@@ -1638,11 +1725,11 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	// 7 Card Games (USA)
 	else if (strcmp(romTid, "K7CE") == 0) {
 		*(u32*)0x02012574 = 0xE1A00000; // nop
-		tonccpy((u32*)0x020130EC, dsiSaveGetResultCode, 0xC);
+		// tonccpy((u32*)0x020130EC, dsiSaveGetResultCode, 0xC);
 		*(u32*)0x02015FA4 = 0xE1A00000; // nop
 		patchInitDSiWare(0x0201CB3C, heapEnd);
 		patchUserSettingsReadDSiWare(0x0201E1F8);
-		setBL(0x02034820, (u32)dsiSaveOpen);
+		/* setBL(0x02034820, (u32)dsiSaveOpen); // Part of .pck file
 		setBL(0x02034830, (u32)dsiSaveClose);
 		*(u32*)0x020348A8 = 0xE1A00000; // nop
 		setBL(0x02034C24, (u32)dsiSaveCreate); // dsiSaveCreateAuto
@@ -1654,7 +1741,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02034E0C, (u32)dsiSaveSeek);
 		setBL(0x02034E24, (u32)dsiSaveRead);
 		setBL(0x02034EAC, (u32)dsiSaveSeek);
-		setBL(0x02034EC4, (u32)dsiSaveWrite);
+		setBL(0x02034EC4, (u32)dsiSaveWrite); */
 		*(u32*)0x020417CC = 0xE12FFF1E; // bx lr (Skip Manual screen)
 		*(u32*)0x02041B88 = 0xE1A00000; // nop
 	}
@@ -1663,7 +1750,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	// Opening Scores menu causes a crash for some reason
 	else if (strcmp(romTid, "K7WE") == 0) {
 		useSharedFont = (twlFontFound && debugOrMep);
-		*(u32*)0x020549CC = 0xE3A00001; // mov r0, #1 (dsiSaveOpenDir)
+		/* *(u32*)0x020549CC = 0xE3A00001; // mov r0, #1 (dsiSaveOpenDir) // Part of .pck file
 		*(u32*)0x020549DC = 0xE1A00000; // nop (dsiSaveCloseDir)
 		*(u32*)0x020549F8 = 0xE1A00000; // nop
 		setBL(0x020572A4, (u32)dsiSaveOpen);
@@ -1679,7 +1766,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02057E80, (u32)dsiSaveCreate);
 		setBL(0x02057E94, (u32)dsiSaveOpen);
 		setBL(0x02057ED0, (u32)dsiSaveWrite);
-		setBL(0x02057EF8, (u32)dsiSaveClose);
+		setBL(0x02057EF8, (u32)dsiSaveClose); */
 		if (useSharedFont) {
 			if (!extendedMemory) {
 				patchTwlFontLoad(0x0205D80C, 0x020A1B54);
@@ -1702,7 +1789,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0201F868 = 0xE1A00000; // nop
 		patchInitDSiWare(0x02024E3C, heapEnd);
 		patchUserSettingsReadDSiWare(0x02026420);
-		setBL(0x02035444, (u32)dsiSaveCreate);
+		/* setBL(0x02035444, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x02035454, (u32)dsiSaveOpen);
 		setBL(0x02035470, (u32)dsiSaveGetResultCode);
 		setBL(0x02035494, (u32)dsiSaveSeek);
@@ -1715,7 +1802,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02035560, (u32)dsiSaveGetLength);
 		setBL(0x02035594, (u32)dsiSaveRead);
 		setBL(0x020355AC, (u32)dsiSaveClose);
-		setBL(0x020355B8, (u32)dsiSaveGetResultCode);
+		setBL(0x020355B8, (u32)dsiSaveGetResultCode); */
 		if (!extendedMemory) {
 			*(u32*)0x0203D544 = 0xE12FFF1E; // bx lr
 		}
@@ -1730,7 +1817,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02015238 = 0xE1A00000; // nop
 		patchInitDSiWare(0x0201A80C, heapEnd);
 		patchUserSettingsReadDSiWare(0x0201BDF0);
-		setBL(0x0202AE14, (u32)dsiSaveCreate);
+		/* setBL(0x0202AE14, (u32)dsiSaveCreate); // Part of .pck file
 		setBL(0x0202AE24, (u32)dsiSaveOpen);
 		setBL(0x0202AE40, (u32)dsiSaveGetResultCode);
 		setBL(0x0202AE64, (u32)dsiSaveSeek);
@@ -1743,7 +1830,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0202AF30, (u32)dsiSaveGetLength);
 		setBL(0x0202AF64, (u32)dsiSaveRead);
 		setBL(0x0202AF7C, (u32)dsiSaveClose);
-		setBL(0x0202AF88, (u32)dsiSaveGetResultCode);
+		setBL(0x0202AF88, (u32)dsiSaveGetResultCode); */
 		if (!extendedMemory) {
 			*(u32*)0x02032F10 = 0xE12FFF1E; // bx lr
 		}
@@ -1759,7 +1846,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02005168 = 0xE1A00000; // nop
 		*(u32*)0x02011E1C = 0xE1A00000; // nop
 		*(u32*)0x02011E50 = 0xE1A00000; // nop
-		*(u32*)0x02013E8C = 0xE3A00001; // mov r0, #1
+		/* *(u32*)0x02013E8C = 0xE3A00001; // mov r0, #1 // Part of .pck file
 		*(u32*)0x02013EA8 = 0xE1A00000; // nop
 		*(u32*)0x02013EDC = 0xE1A00000; // nop
 		*(u32*)0x02013EE4 = 0xE1A00000; // nop
@@ -1782,7 +1869,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02032154, (u32)dsiSaveCreate);
 		setBL(0x02032180, (u32)dsiSaveOpen);
 		setBL(0x020321BC, (u32)dsiSaveWrite);
-		setBL(0x020321CC, (u32)dsiSaveClose);
+		setBL(0x020321CC, (u32)dsiSaveClose); */
 		*(u32*)0x0204F5B0 = 0xE1A00000; // nop
 		*(u32*)0x02053278 = 0xE1A00000; // nop
 		patchInitDSiWare(0x0206A010, heapEnd);
@@ -1798,7 +1885,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02005150 = 0xE1A00000; // nop
 		*(u32*)0x02010EAC = 0xE1A00000; // nop
 		*(u32*)0x02010EE0 = 0xE1A00000; // nop
-		*(u32*)0x02012F1C = 0xE3A00001; // mov r0, #1
+		/* *(u32*)0x02012F1C = 0xE3A00001; // mov r0, #1 // Part of .pck file
 		*(u32*)0x02012F38 = 0xE1A00000; // nop
 		*(u32*)0x02012F6C = 0xE1A00000; // nop
 		*(u32*)0x02012F74 = 0xE1A00000; // nop
@@ -1821,7 +1908,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02031234, (u32)dsiSaveCreate);
 		setBL(0x02031260, (u32)dsiSaveOpen);
 		setBL(0x0203129C, (u32)dsiSaveWrite);
-		setBL(0x020312AC, (u32)dsiSaveClose); 
+		setBL(0x020312AC, (u32)dsiSaveClose); */
 		*(u32*)0x0205FCF4 = 0xE1A00000; // nop
 		*(u32*)0x0206488C = 0xE1A00000; // nop
 		patchInitDSiWare(0x0206CFBC, heapEnd);
@@ -1837,7 +1924,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02005168 = 0xE1A00000; // nop
 		*(u32*)0x02010F2C = 0xE1A00000; // nop
 		*(u32*)0x02010F60 = 0xE1A00000; // nop
-		setBL(0x02012E48, (u32)dsiSaveCreate);
+		/* setBL(0x02012E48, (u32)dsiSaveCreate); // Part of .pck file
 		*(u32*)0x02012E5C = 0xE1A00000; // nop
 		*(u32*)0x02012E68 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x02012EF8 = 0xE1A00000; // nop
@@ -1859,7 +1946,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x020311C8, (u32)dsiSaveCreate);
 		setBL(0x02031164, (u32)dsiSaveOpen);
 		setBL(0x020311A0, (u32)dsiSaveWrite);
-		setBL(0x020311B0, (u32)dsiSaveClose);
+		setBL(0x020311B0, (u32)dsiSaveClose); */
 		*(u32*)0x02063618 = 0xE1A00000; // nop
 		patchInitDSiWare(0x0206BD64, heapEnd);
 		*(u32*)0x020726F0 = 0xE1A00000; // nop
@@ -1882,7 +1969,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200515C = 0xE1A00000; // nop
 		*(u32*)0x02010CE8 = 0xE1A00000; // nop
 		*(u32*)0x02010D1C = 0xE1A00000; // nop
-		setBL(0x02012BD4, (u32)dsiSaveCreate);
+		/* setBL(0x02012BD4, (u32)dsiSaveCreate); // Part of .pck file
 		*(u32*)0x02012BE8 = 0xE1A00000; // nop
 		*(u32*)0x02012BF4 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x02012C84 = 0xE1A00000; // nop
@@ -1890,9 +1977,9 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02012C8C = 0xE1A00000; // nop
 		setBL(0x02012C98, (u32)dsiSaveGetResultCode);
 		*(u32*)0x02012CB4 = 0xE1A00000; // nop
-		*(u32*)0x02012CC0 = 0xE3A00001; // mov r0, #1
+		*(u32*)0x02012CC0 = 0xE3A00001; // mov r0, #1 */
 		if (romTid[3] == 'E') {
-			setBL(0x02031820, (u32)dsiSaveOpen);
+			/* setBL(0x02031820, (u32)dsiSaveOpen);
 			setBL(0x02031838, (u32)dsiSaveGetLength);
 			setBL(0x02031848, (u32)dsiSaveSeek);
 			setBL(0x02031858, (u32)dsiSaveWrite);
@@ -1905,12 +1992,12 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x0203198C, (u32)dsiSaveCreate);
 			setBL(0x020319B8, (u32)dsiSaveOpen);
 			setBL(0x020319F4, (u32)dsiSaveWrite);
-			setBL(0x02031A04, (u32)dsiSaveClose);
+			setBL(0x02031A04, (u32)dsiSaveClose); */
 			*(u32*)0x02061478 = 0xE1A00000; // nop
 			patchInitDSiWare(0x02069B80, heapEnd);
 			*(u32*)0x0207050C = 0xE1A00000; // nop
 		} else {
-			setBL(0x02031870, (u32)dsiSaveOpen);
+			/* setBL(0x02031870, (u32)dsiSaveOpen);
 			setBL(0x02031888, (u32)dsiSaveGetLength);
 			setBL(0x02031898, (u32)dsiSaveSeek);
 			setBL(0x020318A8, (u32)dsiSaveWrite);
@@ -1923,7 +2010,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x020319DC, (u32)dsiSaveCreate);
 			setBL(0x02031A08, (u32)dsiSaveOpen);
 			setBL(0x02031A44, (u32)dsiSaveWrite);
-			setBL(0x02031A54, (u32)dsiSaveClose);
+			setBL(0x02031A54, (u32)dsiSaveClose); */
 			*(u32*)0x020614C8 = 0xE1A00000; // nop
 			patchInitDSiWare(0x02069BD0, heapEnd);
 			*(u32*)0x0207055C = 0xE1A00000; // nop
@@ -1948,7 +2035,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0200515C = 0xE1A00000; // nop
 		*(u32*)0x02010CE4 = 0xE1A00000; // nop
 		*(u32*)0x02010D18 = 0xE1A00000; // nop
-		setBL(0x02011918, (u32)dsiSaveCreate);
+		/* setBL(0x02011918, (u32)dsiSaveCreate); // Part of .pck file
 		*(u32*)0x0201192C = 0xE1A00000; // nop
 		*(u32*)0x02011938 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x020119CC = 0xE1A00000; // nop
@@ -1956,9 +2043,9 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x020119D4 = 0xE1A00000; // nop
 		setBL(0x020119E0, (u32)dsiSaveGetResultCode);
 		*(u32*)0x020119FC = 0xE1A00000; // nop
-		*(u32*)0x02011A08 = 0xE3A00001; // mov r0, #1
+		*(u32*)0x02011A08 = 0xE3A00001; // mov r0, #1 */
 		if (romTid[3] == 'E') {
-			setBL(0x020302D4, (u32)dsiSaveOpen);
+			/* setBL(0x020302D4, (u32)dsiSaveOpen);
 			setBL(0x020302EC, (u32)dsiSaveGetLength);
 			setBL(0x020302FC, (u32)dsiSaveSeek);
 			setBL(0x0203030C, (u32)dsiSaveWrite);
@@ -1971,12 +2058,12 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x02030440, (u32)dsiSaveCreate);
 			setBL(0x0203046C, (u32)dsiSaveOpen);
 			setBL(0x020304A8, (u32)dsiSaveWrite);
-			setBL(0x020304B8, (u32)dsiSaveClose);
+			setBL(0x020304B8, (u32)dsiSaveClose); */
 			*(u32*)0x02061590 = 0xE1A00000; // nop
 			patchInitDSiWare(0x02069CC4, heapEnd);
 			*(u32*)0x02070668 = 0xE1A00000; // nop
 		} else {
-			setBL(0x02030324, (u32)dsiSaveOpen);
+			/* setBL(0x02030324, (u32)dsiSaveOpen);
 			setBL(0x0203033C, (u32)dsiSaveGetLength);
 			setBL(0x0203034C, (u32)dsiSaveSeek);
 			setBL(0x0203035C, (u32)dsiSaveWrite);
@@ -1989,7 +2076,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			setBL(0x02030490, (u32)dsiSaveCreate);
 			setBL(0x020304BC, (u32)dsiSaveOpen);
 			setBL(0x020304F8, (u32)dsiSaveWrite);
-			setBL(0x02030508, (u32)dsiSaveClose);
+			setBL(0x02030508, (u32)dsiSaveClose); */
 			*(u32*)0x020615E0 = 0xE1A00000; // nop
 			patchInitDSiWare(0x02069E14, heapEnd);
 			*(u32*)0x020706B8 = 0xE1A00000; // nop
@@ -2358,7 +2445,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)(0x020420F4+offsetChange4) = 0xE1A00000; // nop
 		*(u32*)(0x02048AC0+offsetChangeInit) = 0xE1A00000; // nop
 		*(u32*)(0x0204C1C8+offsetChangeInit) = 0xE1A00000; // nop
-		patchInitDSiWare(0x0205859C+offsetChangeInit, heapEndMaxForRetail_512KBFreeForDebugAlt);
+		patchInitDSiWare(0x0205859C+offsetChangeInit, heapEndMaxForRetail2_512KBFreeForDebugAlt);
 		*(u32*)(0x02058928+offsetChangeInit) = *(u32*)0x02004FD0;
 		patchUserSettingsReadDSiWare(0x02059B68+offsetChangeInit);
 		*(u32*)(0x02059B84+offsetChangeInit) = wirelessReturnCodeArm;
@@ -2660,6 +2747,140 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			*(u32*)0x020D40B4 = 0xE12FFF1E; // bx lr
 		}
 	}
+
+	// Animal Crossing Calculator (USA)
+	// Requires either 8MB of RAM or Memory Expansion Pak
+	else if (strcmp(romTid, "KWGE") == 0 && debugOrMep) {
+		doubleNopT(0x0200504E);
+		doubleNopT(0x02005060); // Disable NFTR loading from TWLNAND
+		if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x02037298, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x0200F078 = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x0200F07A = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x02023876, 0x02037298);
+			setBLThumb(0x020238BA, 0x02037298);
+		}
+		*(u16*)0x0200FF50 = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x0200FF52 = 0x04C0; // lsls r0, r0, 0x13 ->
+		*(u16*)0x02031F48 = 0xB003; // ADD SP, SP, #0xC
+		*(u16*)0x02031F4A = 0xBD78; // POP {R3-R6,PC}
+		doubleNopT(0x02034224);
+		doubleNopT(0x020388DC);
+		doubleNopT(0x02039E2A);
+		doubleNopT(0x02039E2E);
+		doubleNopT(0x02039E3A);
+		doubleNopT(0x02039F26);
+		patchHiHeapDSiWareThumb(0x02039F64, 0x02037290, heapEnd);
+		*(u32*)0x0203A03C = *(u32*)0x02004FBC;
+		patchUserSettingsReadDSiWare(0x0203AD94);
+	}
+
+	// Animal Crossing Calculator (Europe, Australia)
+	// Requires 8MB of RAM
+	else if (strcmp(romTid, "KWGV") == 0 && extendedMemory) {
+		doubleNopT(0x0200504E);
+		doubleNopT(0x02005060); // Disable NFTR loading from TWLNAND
+		/* if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x02037390, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x0200F170 = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x0200F172 = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x0202396E, 0x02037390);
+			setBLThumb(0x020239B2, 0x02037390);
+		} */
+		*(u16*)0x02010048 = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x0201004A = 0x04C0; // lsls r0, r0, 0x13 ->
+		*(u16*)0x02032040 = 0xB003; // ADD SP, SP, #0xC
+		*(u16*)0x02032042 = 0xBD78; // POP {R3-R6,PC}
+		doubleNopT(0x0203431C);
+		doubleNopT(0x020389D4);
+		doubleNopT(0x02039F22);
+		doubleNopT(0x02039F26);
+		doubleNopT(0x02039F32);
+		doubleNopT(0x0203A01E);
+		patchHiHeapDSiWareThumb(0x0203A05C, 0x02037388, heapEnd);
+		*(u32*)0x0203A134 = *(u32*)0x02004FBC;
+		patchUserSettingsReadDSiWare(0x0203AE8C);
+	}
+
+	// Animal Crossing Calculator (China)
+	// Requires either 8MB of RAM or Memory Expansion Pak
+	else if (strcmp(romTid, "KWGC") == 0 && debugOrMep) {
+		doubleNopT(0x020050A6);
+		doubleNopT(0x020050B2); // Disable NFTR loading from TWLNAND
+		doubleNopT(0x020050E2);
+		doubleNopT(0x020050E8);
+		doubleNopT(0x020050F6);
+		if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x0203A044, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x0200E804 = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x0200E806 = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x02022B52, 0x0203A044);
+			setBLThumb(0x02022B96, 0x0203A044);
+		}
+		*(u16*)0x0200F6BC = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x0200F6BE = 0x04C0; // lsls r0, r0, 0x13 ->
+		doubleNopT(0x0203115A);
+		doubleNopT(0x0203330A);
+		doubleNopT(0x0203696C);
+		doubleNopT(0x02037F7E);
+		doubleNopT(0x02037F82);
+		doubleNopT(0x02037F8E);
+		doubleNopT(0x02038072);
+		patchHiHeapDSiWareThumb(0x020380B0, 0x02035AA4, heapEnd);
+		*(u32*)0x02038188 = *(u32*)0x02004FDC;
+		patchUserSettingsReadDSiWare(0x0203B6F6);
+	}
+
+	// Nintendo DSi Tokei: Doubutsu no Mori Type (Japan)
+	// Likely only works on 8MB of RAM
+	/* else if (strcmp(romTid, "KWCJ") == 0 && debugOrMep) {
+		doubleNopT(0x0200504E);
+		doubleNopT(0x0200505A); // Disable NFTR loading from TWLNAND
+		doubleNopT(0x020090E6);
+		doubleNopT(0x020091BC);
+		if (!extendedMemory) {
+			const u32 newCodeAddr = 0x02034D88;
+			const u32 newCodeAddr2 = newCodeAddr+0x78;
+
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)newCodeAddr, marioCalcStrbForSlot2, 0x78);
+
+			extern u16* marioClockHeapAlloc;
+			tonccpy((u16*)newCodeAddr2, marioClockHeapAlloc, 0x28);
+			*(u32*)(newCodeAddr2+0x1C) = 0x02043B1D;
+			*(u32*)(newCodeAddr2+0x20) = (s2FlashcardId == 0x5A45) ? 0x08000000 : 0x09000000;
+
+			setBLThumb(0x0200C55C, newCodeAddr2);
+
+			setBLThumb(0x02021362, newCodeAddr);
+			setBLThumb(0x020213A6, newCodeAddr);
+		}
+		*(u16*)0x0200D410 = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x0200D412 = 0x04C0; // lsls r0, r0, 0x13 ->
+		*(u16*)0x0202FA40 = 0xB003; // ADD SP, SP, #0xC
+		*(u16*)0x0202FA42 = 0xBD78; // POP {R3-R6,PC}
+		doubleNopT(0x02031D14);
+		doubleNopT(0x020363CC);
+		doubleNopT(0x0203795E);
+		doubleNopT(0x02037962);
+		doubleNopT(0x0203796E);
+		doubleNopT(0x02037A5A);
+		patchHiHeapDSiWareThumb(0x02037A98, 0x02034D80, heapEnd);
+		*(u32*)0x02037B70 = *(u32*)0x02004FBC;
+		patchUserSettingsReadDSiWare(0x020388C8);
+	} */
 
 	// Animal Puzzle Adventure (USA)
 	else if (strcmp(romTid, "KPCE") == 0) {
@@ -4316,18 +4537,11 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	// Art Style: BASE 10 (USA)
 	else if (strcmp(romTid, "KADE") == 0) {
-		*getOffsetFromBL((u32*)0x020074A8) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074BC) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074D8) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074E8) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x02007500) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020075C4) = 0xE12FFF1E; // bx lr
 		*(u32*)0x0202D25C = 0xEB00007C; // bl 0x0202D454 (Skip Manual screen)
 		// *(u32*)0x0202D2EC = 0xE3A00000; // mov r0, #0
 		// *(u32*)0x0202D314 = 0xE3A00000; // mov r0, #0
 		setBL(0x0203A248, (u32)dsiSaveOpen);
 		setBL(0x0203A26C, (u32)dsiSaveClose);
-		*(u32*)0x0203A288 = 0xE3A00000; // mov r0, #0
 		*(u32*)0x0203A2B8 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc)
 		*(u32*)0x0203A2DC = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
 		setBL(0x0203A2FC, (u32)dsiSaveCreate);
@@ -4340,37 +4554,15 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0203A4E0, (u32)dsiSaveOpen);
 		setBL(0x0203A508, (u32)dsiSaveWrite);
 		setBL(0x0203A524, (u32)dsiSaveClose);
-		*(u32*)0x02056724 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02059F88 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02064FC0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020668F8 = 0xE3A00001; // mov r0, #1
-		*(u32*)0x020668FC = 0xE12FFF1E; // bx lr
-		*(u32*)0x02066E50 = 0xE1A00000; // nop
-		*(u32*)0x02066E54 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02066E6C = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02066FB4 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067050 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067080 = 0xE3A00000; // mov r0, #0
-		// *(u32*)0x02067154 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067184 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x0206865C = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020686B0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02068A98 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02070068 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02059DA8 = 0xE3A00001; // mov r0, #1 (Enable NitroFS reads)
+		// *(u32*)0x02067154 = 0xE3A00001; // mov r0, #1
 	}
 
 	// Art Style: CODE (Europe, Australia)
 	else if (strcmp(romTid, "KADV") == 0) {
-		*getOffsetFromBL((u32*)0x020074A8) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074BC) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074D8) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074E8) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x02007500) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020075C4) = 0xE12FFF1E; // bx lr
 		*(u32*)0x0202D288 = 0xEB00007C; // bl 0x0202D480 (Skip Manual screen)
 		setBL(0x0203A2D8, (u32)dsiSaveOpen);
 		setBL(0x0203A2FC, (u32)dsiSaveClose);
-		*(u32*)0x0203A318 = 0xE3A00000; // mov r0, #0
 		*(u32*)0x0203A348 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc)
 		*(u32*)0x0203A36C = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
 		setBL(0x0203A38C, (u32)dsiSaveCreate);
@@ -4383,37 +4575,14 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0203A570, (u32)dsiSaveOpen);
 		setBL(0x0203A598, (u32)dsiSaveWrite);
 		setBL(0x0203A5B4, (u32)dsiSaveClose);
-		*(u32*)0x020567B4 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x0205A018 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02065050 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02066988 = 0xE3A00001; // mov r0, #1
-		*(u32*)0x0206698C = 0xE12FFF1E; // bx lr
-		*(u32*)0x02066EE0 = 0xE1A00000; // nop
-		*(u32*)0x02066EE4 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02066EFC = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067044 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020670E0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067110 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020671E4 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067214 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020686EC = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02068740 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02068B28 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020700F8 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02059E38 = 0xE3A00001; // mov r0, #1 (Enable NitroFS reads)
 	}
 
 	// Art Style: DECODE (Japan)
 	else if (strcmp(romTid, "KADJ") == 0) {
-		*getOffsetFromBL((u32*)0x020074B0) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074C4) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074E0) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020074F0) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x02007508) = 0xE12FFF1E; // bx lr
-		*getOffsetFromBL((u32*)0x020075C8) = 0xE12FFF1E; // bx lr
 		*(u32*)0x0202E2AC = 0xEB000071; // bl 0x0202E478 (Skip Manual screen)
 		setBL(0x0203B108, (u32)dsiSaveOpen);
 		setBL(0x0203B12C, (u32)dsiSaveClose);
-		*(u32*)0x0203B148 = 0xE3A00000; // mov r0, #0
 		*(u32*)0x0203B170 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc)
 		*(u32*)0x0203B194 = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
 		setBL(0x0203B1B0, (u32)dsiSaveCreate);
@@ -4426,21 +4595,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0203B398, (u32)dsiSaveOpen);
 		setBL(0x0203B3C4, (u32)dsiSaveWrite);
 		setBL(0x0203B3E0, (u32)dsiSaveClose);
-		*(u32*)0x020575B0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x0205AE14 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067784 = 0xE3A00001; // mov r0, #1
-		*(u32*)0x02067788 = 0xE12FFF1E; // bx lr
-		*(u32*)0x02067CDC = 0xE1A00000; // nop
-		*(u32*)0x02067CE0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067CF8 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067E40 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067EDC = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067F0C = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02067FE0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02068010 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02069480 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x020694C0 = 0xE3A00000; // mov r0, #0
-		*(u32*)0x02070E08 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0205AC34 = 0xE3A00001; // mov r0, #1 (Enable NitroFS reads)
 	}
 
 	// Beauty Academy (Europe)
@@ -5798,7 +5953,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			saveFuncOffsets[18] = (u32*)0x0205C954;
 			saveFuncOffsets[19] = (u32*)0x0205C95C;
 			saveFuncOffsets[20] = (u32*)0x0205C9BC;
-			saveFuncOffsets[21] = (u32*)0x0205C9D4; 
+			saveFuncOffsets[21] = (u32*)0x0205C9D4;
 		}
 
 		setBL((u32)saveFuncOffsets[0], (u32)dsiSaveOpen);
@@ -7103,11 +7258,10 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}
 
 	// Chuugaku Eijukugo: Kiho 150 Go Master (Japan)
-	// Koukou Eitango: Kiho 400 Go Master (Japan)
-	else if (strcmp(romTid, "KJCJ") == 0 || strcmp(romTid, "KEKJ") == 0) {
-		u8 offsetChange1 = (strncmp(romTid, "KJC", 3) == 0) ? 0 : 0x48;
-		u16 offsetChange2 = (strncmp(romTid, "KJC", 3) == 0) ? 0 : 0x114;
-		u16 offsetChange3 = (strncmp(romTid, "KJC", 3) == 0) ? 0 : 0x110;
+	else if (strcmp(romTid, "KJCJ") == 0) {
+		u8 offsetChange1 = 0;
+		u16 offsetChange2 = 0;
+		u16 offsetChange3 = 0;
 
 		*(u32*)0x02012C6C = 0xE1A00000; // nop
 		*(u32*)0x02016330 = 0xE1A00000; // nop
@@ -7671,8 +7825,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}
 
 	// G.G Series: Conveyor Konpo (Japan)
-	// G.G Series: Energy Chain (Japan)
-	else if (strcmp(romTid, "KH5J") == 0 || strcmp(romTid, "KD7J") == 0) {
+	else if (strcmp(romTid, "KH5J") == 0) {
 		*(u32*)0x02007214 = 0xE3A00000; // mov r0, #0
 		*(u32*)0x02007218 = 0xE12FFF1E; // bx lr
 		setBL(0x02007280, (u32)dsiSaveGetInfo);
@@ -7694,35 +7847,18 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x02007600, (u32)dsiSaveClose);
 		*(u32*)0x020078FC = 0xE3A00000; // mov r0, #0
 		*(u32*)0x02007900 = 0xE12FFF1E; // bx lr
-		if (strcmp(romTid, "KH5J") == 0) {
-			*(u32*)0x02008188 = 0xE1A00000; // nop
-			*(u32*)0x0204017C = 0xE1A00000; // nop
-			tonccpy((u32*)0x02040E10, dsiSaveGetResultCode, 0xC);
-			*(u32*)0x020441DC = 0xE1A00000; // nop
-			*(u32*)0x0204C440 = 0xE3A00001; // mov r0, #1
-			patchInitDSiWare(0x0204C458, heapEnd);
-			if (!extendedMemory) {
-				*(u32*)0x0204C7C8 -= 0x3A000;
-			}
-			patchUserSettingsReadDSiWare(0x0204DC10);
-			if (!extendedMemory) {
-				*(u32*)0x0205C1D4 = 0x50000; // Shrink large part of heap from 0xF0000
-			}
-		} else {
-			*(u32*)0x0200D9F0 = 0xE1A00000; // nop
-			*(u32*)0x0204599C = 0xE1A00000; // nop
-			tonccpy((u32*)0x02046630, dsiSaveGetResultCode, 0xC);
-			*(u32*)0x020499FC = 0xE1A00000; // nop
-			*(u32*)0x02051C60 = 0xE3A00001; // mov r0, #1
-			patchInitDSiWare(0x02051C78, heapEnd);
-			if (!extendedMemory) {
-				*(u32*)0x02051FE8 -= 0x3A000;
-			}
-			patchUserSettingsReadDSiWare(0x02053430);
-			if (!extendedMemory) {
-				*(u32*)0x02062054 = 0x50000; // Shrink large part of heap from 0xF0000
-				*(u32*)0x020620B8 = *(u32*)0x02062054;
-			}
+		*(u32*)0x02008188 = 0xE1A00000; // nop
+		*(u32*)0x0204017C = 0xE1A00000; // nop
+		tonccpy((u32*)0x02040E10, dsiSaveGetResultCode, 0xC);
+		*(u32*)0x020441DC = 0xE1A00000; // nop
+		*(u32*)0x0204C440 = 0xE3A00001; // mov r0, #1
+		patchInitDSiWare(0x0204C458, heapEnd);
+		if (!extendedMemory) {
+			*(u32*)0x0204C7C8 -= 0x3A000;
+		}
+		patchUserSettingsReadDSiWare(0x0204DC10);
+		if (!extendedMemory) {
+			*(u32*)0x0205C1D4 = 0x50000; // Shrink large part of heap from 0xF0000
 		}
 	}
 
@@ -8813,9 +8949,11 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			offset[i] = 0xE1A00000; // nop
 		}*/
 	}
+#endif
 
+#ifdef LOADERTYPE1
 	// Dekisugi Tingle Pack (Japan)
-	else if (strcmp(romTid, "KCPJ") == 0) {
+	if (strcmp(romTid, "KCPJ") == 0) {
 		*(u32*)0x0200506C = 0xE1A00000; // nop
 		*(u32*)0x020050C0 = 0xE1A00000; // nop
 		*(u32*)0x020050FC = 0xE1A00000; // nop
@@ -10833,7 +10971,43 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}
 
 	// G.G Series: Energy Chain (Japan)
-	// See "G.G Series: Conveyor Konpo (Japan)"
+	else if (strcmp(romTid, "KD7J") == 0) {
+		*(u32*)0x02007214 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02007218 = 0xE12FFF1E; // bx lr
+		setBL(0x02007280, (u32)dsiSaveGetInfo);
+		*(u32*)0x02007298 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc)
+		*(u32*)0x020072B0 = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
+		setBL(0x020072C4, (u32)dsiSaveCreate);
+		setBL(0x02007398, (u32)dsiSaveGetInfo);
+		setBL(0x020073C0, (u32)dsiSaveGetInfo);
+		setBL(0x02007478, (u32)dsiSaveOpen);
+		setBL(0x020074A0, (u32)dsiSaveSetLength);
+		setBL(0x020074BC, (u32)dsiSaveWrite);
+		setBL(0x020074C4, (u32)dsiSaveWrite); // dsiSaveWriteAsync
+		setBL(0x02007508, (u32)dsiSaveClose);
+		setBL(0x02007560, (u32)dsiSaveOpen);
+		setBL(0x02007580, (u32)dsiSaveGetLength);
+		setBL(0x02007590, (u32)dsiSaveClose);
+		setBL(0x020075B0, (u32)dsiSaveRead);
+		setBL(0x020075BC, (u32)dsiSaveRead); // dsiSaveReadAsync
+		setBL(0x02007600, (u32)dsiSaveClose);
+		*(u32*)0x020078FC = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02007900 = 0xE12FFF1E; // bx lr
+		*(u32*)0x0200D9F0 = 0xE1A00000; // nop
+		*(u32*)0x0204599C = 0xE1A00000; // nop
+		tonccpy((u32*)0x02046630, dsiSaveGetResultCode, 0xC);
+		*(u32*)0x020499FC = 0xE1A00000; // nop
+		*(u32*)0x02051C60 = 0xE3A00001; // mov r0, #1
+		patchInitDSiWare(0x02051C78, heapEnd);
+		if (!extendedMemory) {
+			*(u32*)0x02051FE8 -= 0x3A000;
+		}
+		patchUserSettingsReadDSiWare(0x02053430);
+		if (!extendedMemory) {
+			*(u32*)0x02062054 = 0x50000; // Shrink large part of heap from 0xF0000
+			*(u32*)0x020620B8 = *(u32*)0x02062054;
+		}
+	}
 
 	// Escape Trick: The Secret of Rock City Prison (USA)
 	// Requires 8MB of RAM(?)
@@ -10934,7 +11108,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}
 
 	// Famicom Wars DS: Ushinawareta Hikari (Japan)
-	// DSi save function patching not needed 
+	// DSi save function patching not needed
 	else if (strcmp(romTid, "Z2EJ") == 0) {
 		*(u32*)0x02015BC4 = 0xE1A00000; // nop
 		*(u32*)0x020197B8 = 0xE1A00000; // nop
@@ -12963,7 +13137,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	// Ichi Moudaji!: Neko King (Japan)
 	// Either this uses more than one save file in filesystem, or saving is somehow just bugged
-	/* if (strcmp(romTid, "KNEJ") == 0) {
+	/* else if (strcmp(romTid, "KNEJ") == 0) {
 		*(u32*)0x02003398 = 0xE1A00000; // nop
 		*(u32*)0x02011F90 = 0xE1A00000; // nop (Disable NFTR loading from TWLNAND)
 		setBL(0x02012210, (u32)dsiSaveCreate);
@@ -13707,7 +13881,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		patchInitDSiWare(0x0209CC28, heapEnd);
 		patchUserSettingsReadDSiWare(0x0209E2CC);
 	} */
-#else
+
 	// A Kappa's Trail (USA)
 	// Requires 8MB of RAM
 	// Crashes after ESRB screen
@@ -14049,6 +14223,46 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0207AAB8, (u32)dsiSaveSeek);
 		setBL(0x0207AAD0, (u32)dsiSaveWrite); // dsiSaveWriteAsync
 		*(u32*)0x0207AC30 = 0xE12FFF1E; // bx lr
+	}
+
+	// Koukou Eitango: Kiho 400 Go Master (Japan)
+	else if (strcmp(romTid, "KEKJ") == 0) {
+		u8 offsetChange1 = 0x48;
+		u16 offsetChange2 = 0x114;
+		u16 offsetChange3 = 0x110;
+
+		*(u32*)0x02012C6C = 0xE1A00000; // nop
+		*(u32*)0x02016330 = 0xE1A00000; // nop
+		patchInitDSiWare(0x0201C2DC, heapEnd);
+		// *(u32*)0x0201C64C = *(u32*)0x020013C0;
+		patchUserSettingsReadDSiWare(0x0201DA44);
+		setBL(0x0202CAB8-offsetChange1, (u32)dsiSaveCreate);
+		*(u32*)(0x0204F20C-offsetChange2) = 0xE1A00000; // nop
+		*(u32*)(0x0204F230-offsetChange2) = 0xE1A00000; // nop
+		*(u32*)(0x020643A4-offsetChange2) = 0xE3A00002; // mov r0, #2 (Skip Manual screen, Part 1)
+		*(u32*)(0x02064580-offsetChange3) = 0xE3A00000; // mov r0, #0
+		setBL(0x02076DD0-offsetChange3, (u32)dsiSaveOpen);
+		setBL(0x02076DEC-offsetChange3, (u32)dsiSaveSeek);
+		setBL(0x02076E00-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076E18-offsetChange3, (u32)dsiSaveRead);
+		setBL(0x02076E28-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076E34-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076E68-offsetChange3, (u32)dsiSaveOpen);
+		setBL(0x02076E80-offsetChange3, (u32)dsiSaveSeek);
+		setBL(0x02076E98-offsetChange3, (u32)dsiSaveRead); // dsiSaveReadAsync
+		setBL(0x02076EC8-offsetChange3, (u32)dsiSaveOpen);
+		setBL(0x02076EE0-offsetChange3, (u32)dsiSaveSetLength);
+		setBL(0x02076EF0-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076F04-offsetChange3, (u32)dsiSaveSeek);
+		setBL(0x02076F18-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076F30-offsetChange3, (u32)dsiSaveWrite);
+		setBL(0x02076F40-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076F4C-offsetChange3, (u32)dsiSaveClose);
+		setBL(0x02076F80-offsetChange3, (u32)dsiSaveOpen);
+		setBL(0x02076F94-offsetChange3, (u32)dsiSaveSetLength);
+		setBL(0x02076FAC-offsetChange3, (u32)dsiSaveSeek);
+		setBL(0x02076FC4-offsetChange3, (u32)dsiSaveWrite); // dsiSaveWriteAsync
+		*(u32*)(0x02077124-offsetChange3) = 0xE12FFF1E; // bx lr
 	}
 
 	// Kuizu Ongaku Nojika (Japan)
@@ -15184,10 +15398,23 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}
 
 	// Mario Calculator (USA)
-	// Requires 8MB of RAM
-	else if (strcmp(romTid, "KWFE") == 0 && extendedMemory) {
+	// Requires either 8MB of RAM or Memory Expansion Pak
+	else if (strcmp(romTid, "KWFE") == 0 && debugOrMep) {
 		doubleNopT(0x0200504E);
-		*(u16*)0x02010E64 = 0x7047; // bx lr
+		doubleNopT(0x02005060); // Disable NFTR loading from TWLNAND
+		if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x02039A48, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x0201182C = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x0201182E = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x02026026, 0x02039A48);
+			setBLThumb(0x0202606A, 0x02039A48);
+		}
+		*(u16*)0x02012704 = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x02012706 = 0x04C0; // lsls r0, r0, 0x13 ->
 		*(u16*)0x020346F8 = 0xB003; // ADD SP, SP, #0xC
 		*(u16*)0x020346FA = 0xBD78; // POP {R3-R6,PC}
 		doubleNopT(0x020369D4);
@@ -15197,23 +15424,119 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		doubleNopT(0x0203C5EA);
 		doubleNopT(0x0203C6D6);
 		patchHiHeapDSiWareThumb(0x0203C714, 0x02039A40, heapEnd);
-		// *(u32*)0x0203C7EC = 0x02090140;
-		*(u16*)0x020474DA = nopT;
-		*(u16*)0x020474E6 = nopT;
-		*(u16*)0x020474F0 = nopT;
+		*(u32*)0x0203C7EC = *(u32*)0x02004FBC;
+		patchUserSettingsReadDSiWare(0x0203D544);
+		// *(u16*)0x020474DA = nopT;
+		// *(u16*)0x020474E6 = nopT;
+		// *(u16*)0x020474F0 = nopT;
 	}
 
+	// Mario Calculator (Europe, Australia)
+	// Requires either 8MB of RAM or Memory Expansion Pak
+	else if (strcmp(romTid, "KWFV") == 0 && debugOrMep) {
+		doubleNopT(0x0200504E);
+		doubleNopT(0x02005060); // Disable NFTR loading from TWLNAND
+		if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x02039B20, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x02011904 = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x02011906 = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x020260FE, 0x02039B20);
+			setBLThumb(0x02026142, 0x02039B20);
+		}
+		*(u16*)0x020127DC = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x020127DE = 0x04C0; // lsls r0, r0, 0x13 ->
+		*(u16*)0x020347D0 = 0xB003; // ADD SP, SP, #0xC
+		*(u16*)0x020347D2 = 0xBD78; // POP {R3-R6,PC}
+		doubleNopT(0x02036AAC);
+		doubleNopT(0x0203B164);
+		doubleNopT(0x0203C6B2);
+		doubleNopT(0x0203C6B6);
+		doubleNopT(0x0203C6C2);
+		doubleNopT(0x0203C7AE);
+		patchHiHeapDSiWareThumb(0x0203C7EC, 0x02039B18, heapEnd);
+		*(u32*)0x0203C8C4 = *(u32*)0x02004FBC;
+		patchUserSettingsReadDSiWare(0x0203D61C);
+	}
+
+	// Nintendo DSi Dentaku: Famicom Mario Type (Japan)
+	// Requires either 8MB of RAM or Memory Expansion Pak
+	else if (strcmp(romTid, "KWFJ") == 0 && debugOrMep) {
+		doubleNopT(0x0200504E);
+		doubleNopT(0x0200505A); // Disable NFTR loading from TWLNAND
+		if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x02038C0C, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x02010F3C = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x02010F3E = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x0202530A, 0x02038C0C);
+			setBLThumb(0x0202534E, 0x02038C0C);
+		}
+		*(u16*)0x02011DF0 = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x02011DF2 = 0x04C0; // lsls r0, r0, 0x13 ->
+		*(u16*)0x020338FC = 0xB003; // ADD SP, SP, #0xC
+		*(u16*)0x020338FE = 0xBD78; // POP {R3-R6,PC}
+		doubleNopT(0x02035B98);
+		doubleNopT(0x0203A250);
+		doubleNopT(0x0203B782);
+		doubleNopT(0x0203B786);
+		doubleNopT(0x0203B792);
+		doubleNopT(0x0203B87E);
+		patchHiHeapDSiWareThumb(0x0203B8BC, 0x02038C04, heapEnd);
+		*(u32*)0x0203B994 = *(u32*)0x02004FBC;
+		patchUserSettingsReadDSiWare(0x0203C6EC);
+	}
+
+	// Mario Calculator (China)
+	// Requires either 8MB of RAM or Memory Expansion Pak
+	else if (strcmp(romTid, "KWFC") == 0 && debugOrMep) {
+		doubleNopT(0x020050A6);
+		doubleNopT(0x020050B2); // Disable NFTR loading from TWLNAND
+		doubleNopT(0x020050E2);
+		doubleNopT(0x020050E8);
+		doubleNopT(0x020050F6);
+		if (!extendedMemory) {
+			extern u16* marioCalcStrbForSlot2;
+			tonccpy((u16*)0x0203C86C, marioCalcStrbForSlot2, 0x78);
+
+			// movs r0, (s2FlashcardId == 0x5A45) ? #0x08000000 : #0x09000000
+			*(u16*)0x02010F94 = (s2FlashcardId == 0x5A45) ? 0x2080 : 0x2090; // movs r0, #0x90
+			*(u16*)0x02010F96 = 0x0500; // lsls r0, r0, 0x14
+
+			setBLThumb(0x0202537A, 0x0203C86C);
+			setBLThumb(0x020253BE, 0x0203C86C);
+		}
+		*(u16*)0x02011E4C = 0x2005; // movs r0, #5       -> movs r0, #0x280000 (Shrink heap from 0x400000)
+		*(u16*)0x02011E4E = 0x04C0; // lsls r0, r0, 0x13 ->
+		doubleNopT(0x02033982);
+		doubleNopT(0x02035B32);
+		doubleNopT(0x02039194);
+		doubleNopT(0x0203A7A6);
+		doubleNopT(0x0203A7AA);
+		doubleNopT(0x0203A7B6);
+		doubleNopT(0x0203A89A);
+		patchHiHeapDSiWareThumb(0x0203A8D8, 0x020382CC, heapEnd);
+		*(u32*)0x0203A9B0 = *(u32*)0x02004FDC;
+		patchUserSettingsReadDSiWare(0x0203B6F6);
+	}
+
+#ifndef MVDK3_UNUSED
 	// Mario vs. Donkey Kong: Minis March Again! (USA)
 	// Save code too advanced to patch, preventing support
-	// Requires 8MB of RAM
-	else if (strcmp(romTid, "KDME") == 0 && extendedMemory) {
+	// Mini toy sprites not loaded due to memory limitations
+	// WiFi code patch not possible, due to the code taking place in the overlays
+	else if (strcmp(romTid, "KDME") == 0) {
 		//extern u32* mvdk3HeapAlloc;
 
 		*(u32*)0x02005180 = 0xE3A01702; // mov r1, #0x80000
-		/*if (!extendedMemory) {
-			*(u32*)0x02005188 = 0xE1A00000; // nop (Disable loading sound data)
-		}*/
 		*(u32*)0x02005190 = 0xE1A00000; // nop (Disable NFTR loading from TWLNAND)
+		*(u32*)0x02018EBC = 0xE1A00000; // nop
 		*(u32*)0x0202BE84 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x0202BE88 = 0xE12FFF1E; // bx lr
 		/* *(u32*)0x0202BDB0 = 0xE3A00001; // mov r0, #1 (dsiSaveFlush)
@@ -15246,6 +15569,8 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBL(0x0202CD74, (u32)dsiSaveClose); */
 		*(u32*)0x0202E6F8 = 0xE1A00000; // nop
 		*(u32*)0x0202E788 = 0xE1A00000; // nop
+		*(u32*)0x0202E7B4 = 0x4000; // Shrink sound heap from 0x196000: Disables music
+		*(u32*)0x02032FB0 = 0xE12FFF1E; // bx lr (Skip loading mini toy sprites)
 		/*if (!extendedMemory) {
 			tonccpy((u32*)0x0206AAC8, mvdk3HeapAlloc, 0x1D8);
 			setBL(0x02033288, 0x0206AAC8);
@@ -15253,8 +15578,19 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x020612B8 = 0xE28DD00C; // ADD   SP, SP, #0xC
 		*(u32*)0x020612BC = 0xE8BD8078; // LDMFD SP!, {R3-R6,PC}
 		*(u32*)0x02064F80 = 0xE1A00000; // nop
-		patchInitDSiWare(0x0206F720, heapEndExceed);
+		patchInitDSiWare(0x0206F720, heapEnd);
 		patchUserSettingsReadDSiWare(0x02070E5C);
+		// *(u32*)0x02070E84 = wirelessReturnCodeArm;
+		*(u32*)0x02070E84 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02070E88 = 0xE12FFF1E; // bx lr
+		*(u32*)0x02070EAC = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02070EB0 = 0xE12FFF1E; // bx lr
+		// *(u32*)0x02070ED0 = 0xE3A00001; // mov r0, #1
+		// *(u32*)0x02070ED4 = 0xE12FFF1E; // bx lr
+		// *(u32*)0x02070EE4 = 0xE3A00001; // mov r0, #1
+		// *(u32*)0x02070EE8 = 0xE12FFF1E; // bx lr
+		*(u32*)0x02070EF4 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02070EF8 = 0xE12FFF1E; // bx lr
 		*(u32*)0x02071390 = 0xE1A00000; // nop
 		*(u32*)0x02071394 = 0xE1A00000; // nop
 		*(u32*)0x02071398 = 0xE1A00000; // nop
@@ -15263,24 +15599,41 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 	// Mario vs. Donkey Kong: Minis March Again! (Europe, Australia)
 	// Save code too advanced to patch, preventing support
-	// Requires 8MB of RAM
-	// Does not boot
-	else if (strcmp(romTid, "KDMV") == 0 && extendedMemory) {
+	// Mini toy sprites not loaded due to memory limitations
+	// WiFi code patch not possible, due to the code taking place in the overlays
+	else if (strcmp(romTid, "KDMV") == 0) {
 		*(u32*)0x0200518C = 0xE3A01702; // mov r1, #0x80000
 		/*if (!extendedMemory) {
 			*(u32*)0x02005194 = 0xE1A00000; // nop (Disable loading sound data)
 		}*/
 		*(u32*)0x0200519C = 0xE1A00000; // nop (Disable NFTR loading from TWLNAND)
+		*(u32*)0x020190E8 = 0xE1A00000; // nop
 		*(u32*)0x0202C6D0 = 0xE3A00001; // mov r0, #1
 		*(u32*)0x0202C6D4 = 0xE12FFF1E; // bx lr
 		*(u32*)0x0202EF08 = 0xE1A00000; // nop
 		*(u32*)0x0202EF98 = 0xE1A00000; // nop
+		*(u32*)0x0202EFC4 = 0x4000; // Shrink sound heap from 0x196000: Disables music
 		*(u32*)0x02033850 = 0xE1A00000; // nop
 		*(u32*)0x02033858 = 0xE1A00000; // nop
+		*(u32*)0x02033A6C = 0xE1A00000; // nop (Skip loading mini toy sprites)
+		*(u32*)0x02033A90 = 0xE1A00000; // nop (Skip loading mini toy sprites)
+		*(u32*)0x02033AB4 = 0xE1A00000; // nop (Skip loading mini toy sprites)
+		*(u32*)0x02033AD8 = 0xE1A00000; // nop (Skip loading mini toy sprites)
 		*(u32*)0x020617B4 = 0xE1A00000; // nop
 		*(u32*)0x0206534C = 0xE1A00000; // nop
-		patchInitDSiWare(0x0206E490, heapEndExceed);
+		patchInitDSiWare(0x0206E490, heapEnd);
 		patchUserSettingsReadDSiWare(0x0206FBAC);
+		// *(u32*)0x0206FBD4 = wirelessReturnCodeArm;
+		*(u32*)0x0206FBD4 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0206FBD8 = 0xE12FFF1E; // bx lr
+		*(u32*)0x0206FBE0 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0206FBE4 = 0xE12FFF1E; // bx lr
+		// *(u32*)0x0206FC04 = 0xE3A00001; // mov r0, #1
+		// *(u32*)0x0206FC08 = 0xE12FFF1E; // bx lr
+		// *(u32*)0x0206FC18 = 0xE3A00001; // mov r0, #1
+		// *(u32*)0x0206FC1C = 0xE12FFF1E; // bx lr
+		*(u32*)0x0206FC28 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x0206FC2C = 0xE12FFF1E; // bx lr
 		*(u32*)0x020700AC = 0xE1A00000; // nop
 		*(u32*)0x020700B0 = 0xE1A00000; // nop
 		*(u32*)0x020700B4 = 0xE1A00000; // nop
@@ -15312,6 +15665,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x020700F4 = 0xE1A00000; // nop
 		*(u32*)0x020700F8 = 0xE1A00000; // nop
 	}
+#endif
 
 	// Master of Illusion Express: Deep Psyche (USA, Australia)
 	// A Little Bit of... Magic Made Fun: Deep Psyche (Europe)
@@ -16556,7 +16910,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x0202030C = 0xE12FFF1E; // bx lr (Skip NFTR font rendering)
 		setBL(0x02032160, (u32)dsiSaveOpen);
 		setBL(0x02032178, (u32)dsiSaveClose);
-		*(u32*)0x020321A0 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc) 
+		*(u32*)0x020321A0 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc)
 		*(u32*)0x020321C0 = 0xE1A00000; // nop
 		setBL(0x020321F8, (u32)dsiSaveCreate);
 		setBL(0x0203221C, (u32)dsiSaveGetResultCode);
@@ -17663,7 +18017,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		//tonccpy((u32*)0x0201C5A8, dsiSaveGetResultCode, 0xC);
 		//tonccpy((u32*)0x0201D178, dsiSaveSetLength, 0xC);
 		*(u32*)0x0201F744 = 0xE1A00000; // nop
-		patchInitDSiWare(0x0202EC54, heapEndMaxForRetail);
+		patchInitDSiWare(0x0202EC54, heapEndMaxForRetail2);
 		if (!extendedMemory) {
 			*(u32*)0x0202EFE0 -= 0x3A000;
 		}
@@ -17796,8 +18150,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}
 
 	// G.G Series: Ninja Karakuri Den (Japan)
-	// G.G Series: Wonder Land (Japan)
-	else if (strcmp(romTid, "KAQJ") == 0 || strcmp(romTid, "KWLJ") == 0) {
+	else if (strcmp(romTid, "KAQJ") == 0) {
 		*(u32*)0x02007210 = 0xE3A00000; // mov r0, #0
 		*(u32*)0x02007214 = 0xE12FFF1E; // bx lr
 		setBL(0x0200727C, (u32)dsiSaveGetInfo);
@@ -17820,33 +18173,18 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x020078F8 = 0xE3A00000; // mov r0, #0
 		*(u32*)0x020078FC = 0xE12FFF1E; // bx lr
 		*(u32*)0x02008184 = 0xE1A00000; // nop
-		if (strcmp(romTid, "KAQJ") == 0) {
-			*(u32*)0x020401F4 = 0xE1A00000; // nop
-			tonccpy((u32*)0x02040E88, dsiSaveGetResultCode, 0xC);
-			*(u32*)0x02044254 = 0xE1A00000; // nop
-			*(u32*)0x0204C4B8 = 0xE3A00001; // mov r0, #1
-			patchInitDSiWare(0x0204C4D0, heapEnd);
-			if (!extendedMemory) {
-				*(u32*)0x0204C840 -= 0x3A000;
-			}
-			patchUserSettingsReadDSiWare(0x0204DC88);
-			if (!extendedMemory) {
-				*(u32*)0x0205C1A4 = 0x50000; // Shrink large part of heap from 0xF0000
-				*(u32*)0x0205C208 = *(u32*)0x0205C1A4;
-			}
-		} else {
-			*(u32*)0x0204003C = 0xE1A00000; // nop
-			tonccpy((u32*)0x02040CD0, dsiSaveGetResultCode, 0xC);
-			*(u32*)0x0204409C = 0xE1A00000; // nop
-			*(u32*)0x0204C300 = 0xE3A00001; // mov r0, #1
-			patchInitDSiWare(0x0204C318, heapEnd);
-			if (!extendedMemory) {
-				*(u32*)0x0204C688 -= 0x3A000;
-			}
-			patchUserSettingsReadDSiWare(0x0204DAD0);
-			if (!extendedMemory) {
-				*(u32*)0x0205C110 = 0x50000; // Shrink large part of heap from 0xF0000
-			}
+		*(u32*)0x020401F4 = 0xE1A00000; // nop
+		tonccpy((u32*)0x02040E88, dsiSaveGetResultCode, 0xC);
+		*(u32*)0x02044254 = 0xE1A00000; // nop
+		*(u32*)0x0204C4B8 = 0xE3A00001; // mov r0, #1
+		patchInitDSiWare(0x0204C4D0, heapEnd);
+		if (!extendedMemory) {
+			*(u32*)0x0204C840 -= 0x3A000;
+		}
+		patchUserSettingsReadDSiWare(0x0204DC88);
+		if (!extendedMemory) {
+			*(u32*)0x0205C1A4 = 0x50000; // Shrink large part of heap from 0xF0000
+			*(u32*)0x0205C208 = *(u32*)0x0205C1A4;
 		}
 	}
 
@@ -18336,11 +18674,13 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 			*(u32*)0x020612B4 = *(u32*)0x02061228; // Shrink large part of heap from 0xA0000
 		}
 	}
+#endif
 
+#ifdef LOADERTYPE2
 	// Odekake! Earth Seeker (Japan)
 	// Black screens after company logos
 	// Seemingly not possible to fix the cause? (Fails to read or write save)
-	/*else if (strcmp(romTid, "KA7J") == 0) {
+	/*if (strcmp(romTid, "KA7J") == 0) {
 		*(u32*)0x020107E8 = 0xE1A00000; // nop
 		*(u32*)0x02014350 = 0xE1A00000; // nop
 		*(u32*)0x02018864 = 0xE1A00000; // nop
@@ -18369,10 +18709,10 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	// Orion's Odyssey (USA)
 	// Due to our save implementation, save data is stored in both slots
 	// Crashes later on retail consoles
-	else if (strcmp(romTid, "K6TE") == 0) {
+	if (strcmp(romTid, "K6TE") == 0) {
 		*(u32*)0x02011FAC = 0xE1A00000; // nop
 		*(u32*)0x02015790 = 0xE1A00000; // nop
-		patchInitDSiWare(0x0201ABF0, heapEndMaxForRetail);
+		patchInitDSiWare(0x0201ABF0, heapEndMaxForRetail32);
 		*(u32*)0x0201AF7C = *(u32*)0x02004FE8;
 		patchUserSettingsReadDSiWare(0x0201C1F4);
 		*(u32*)0x02020B68 = 0xE1A00000; // nop
@@ -19106,8 +19446,8 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	}*/
 
 	// Petz Catz: Family (USA)
-	// Unsure if it requires 8MB of RAM
-	/*else if (strcmp(romTid, "KP5E") == 0) {
+	// Crashes after title screen
+	/* else if (strcmp(romTid, "KP5E") == 0) {
 		const u32 dsiSaveCreateT = 0x020A721C;
 		*(u16*)dsiSaveCreateT = 0x4778; // bx pc
 		tonccpy((u32*)(dsiSaveCreateT + 4), dsiSaveCreate, 0xC);
@@ -19137,11 +19477,8 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		tonccpy((u32*)(dsiSaveWriteT + 4), dsiSaveWrite, 0xC);
 
 		doubleNopT(0x020191A8);
-		doubleNopT(0x0201A4E4);
-		doubleNopT(0x0201A4E8);
-		doubleNopT(0x0201A4FC);
-		doubleNopT(0x0201A50E);
-		doubleNopT(0x0201A526);
+		*(u16*)0x02019E12 = nopT;
+		doubleNopT(0x02019E14); // Disable NFTR loading from TWLNAND
 		doubleNopT(0x02031234);
 		setBLThumb(0x0203810A, dsiSaveOpenT);
 		setBLThumb(0x02038152, dsiSaveCloseT);
@@ -19151,43 +19488,13 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		setBLThumb(0x020381D4, dsiSaveReadT);
 		setBLThumb(0x020381F6, dsiSaveSeekT);
 		setBLThumb(0x0203820C, dsiSaveWriteT);
-		if (!extendedMemory) {
-			*(u32*)0x02089404 = 0xE3A00000; // mov r0, #0
-		}
 		*(u32*)0x020A5B04 = 0xE1A00000; // nop
 		tonccpy((u32*)0x020A67EC, dsiSaveGetResultCode, 0xC);
 		*(u32*)0x020A9B78 = 0xE1A00000; // nop
-		*(u32*)0x020B046C = 0xE1A00000; // nop
-		*(u32*)0x020B244C = 0xE1A00000; // nop
-		*(u32*)0x020B2450 = 0xE1A00000; // nop
-		*(u32*)0x020B245C = 0xE1A00000; // nop
-		*(u32*)0x020B25A0 = 0xE1A00000; // nop
-		patchHiHeapDSiWare(0x020B25FC, heapEnd); // mov r0, #0x23E0000
+		patchInitDSiWare(0x020B23C0, heapEnd);
 		*(u32*)0x020B2730 = 0x021CD200;
 		patchUserSettingsReadDSiWare(0x020B3A34);
-		if (!extendedMemory) {
-			*(u32*)0x020CEF70 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CEF74 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CEFD4 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CEFD8 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF038 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF03C = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF09C = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF0A0 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF100 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF104 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF164 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF168 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF1C8 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF1CC = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF22C = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF230 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020CF290 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020CF294 = 0xE12FFF1E; // bx lr
-			*(u32*)0x020D0254 = 0xE3A00000; // mov r0, #0
-			*(u32*)0x020D0258 = 0xE12FFF1E; // bx lr
-		}
-	}*/
+	} */
 
 	// Phantasy Star 0 Mini (Japan)
 	// Save code does not work due to a weird crash caused by it
@@ -19218,7 +19525,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02007FAC = 0xE8BD8078; // LDMFD SP!, {R3-R6,PC}
 		// tonccpy((u32*)0x02009C88, dsiSaveGetResultCode, 0xC);
 		*(u32*)0x0200CC88 = 0xE1A00000; // nop
-		patchInitDSiWare(0x0202D950, heapEndMaxForRetail);
+		patchInitDSiWare(0x0202D950, heapEndMaxForRetail32);
 		*(u32*)0x0202DCCC -= 0x64000;
 		patchUserSettingsReadDSiWare(0x0202EE48);
 		*(u32*)0x0202EE70 = wirelessReturnCodeArm;
@@ -19518,7 +19825,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x02013144 = 0xE1A00000; // nop
 		*(u32*)0x02013158 = 0xE1A00000; // nop
 		*(u32*)0x02016F98 = 0xE1A00000; // nop
-		patchInitDSiWare(0x0201F054, heapEndMaxForRetail);
+		patchInitDSiWare(0x0201F054, heapEndMaxForRetail32);
 		*(u32*)0x0201F3E0 = *(u32*)0x02004FE8;
 		patchUserSettingsReadDSiWare(0x02020614);
 		*(u32*)0x02025884 = 0xE1A00000; // nop
@@ -19566,7 +19873,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		*(u32*)0x020132AC = 0xE1A00000; // nop
 		*(u32*)0x020132C0 = 0xE1A00000; // nop
 		*(u32*)0x0201718C = 0xE1A00000; // nop
-		patchInitDSiWare(0x0201F570, heapEndMaxForRetail);
+		patchInitDSiWare(0x0201F570, heapEndMaxForRetail32);
 		*(u32*)0x0201F8E0 = *(u32*)0x02004FD0;
 		patchUserSettingsReadDSiWare(0x02020B34);
 		*(u32*)0x02026080 = 0xE1A00000; // nop
@@ -19620,7 +19927,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 
 		// Disable NFTR loading from TWLNAND
 		*(u32*)0x02045264 = 0xE1A00000; // nop
-		*(u32*)0x02045268 = 0xE1A00000; // nop 
+		*(u32*)0x02045268 = 0xE1A00000; // nop
 		*(u32*)0x02045270 = 0xE1A00000; // nop
 		*(u32*)0x0204527C = 0xE1A00000; // nop
 		*(u32*)0x02045290 = 0xE1A00000; // nop
@@ -24475,6 +24782,58 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		}
 	}
 
+	// System Flaw: Recruit (USA)
+	// Requires 8MB of RAM
+	else if (strcmp(romTid, "KSYE") == 0 && extendedMemory) {
+		*(u32*)0x0200F4B0 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x020115B8 = 0xE1A00000; // nop
+		*(u32*)0x02014C30 = 0xE1A00000; // nop
+		patchInitDSiWare(0x0201A548, heapEnd);
+		*(u32*)0x0201A8D4 = *(u32*)0x02004FD0;
+		setBL(0x02042080, (u32)dsiSaveOpen);
+		setBL(0x020420D4, (u32)dsiSaveGetLength);
+		setBL(0x020420E4, (u32)dsiSaveRead);
+		setBL(0x020420EC, (u32)dsiSaveClose);
+		setBL(0x02042128, (u32)dsiSaveOpen);
+		*(u32*)0x02042140 = 0xE1A00000; // nop (dsiSaveGetArcSrc)
+		*(u32*)0x02042150 = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
+		setBL(0x0204216C, (u32)dsiSaveCreate);
+		setBL(0x02042178, (u32)dsiSaveClose);
+		setBL(0x02042188, (u32)dsiSaveOpen);
+		setBL(0x020421DC, (u32)dsiSaveSetLength);
+		setBL(0x020421EC, (u32)dsiSaveWrite);
+		setBL(0x020421F4, (u32)dsiSaveClose);
+		/* if (!extendedMemory) {
+			*(u32*)0x02045AF0 = 0xE12FFF1E; // bx lr (Disable music)
+			*(u32*)0x02045CC8 = 0xE12FFF1E; // bx lr (Disable sound)
+		} */
+		setBL(0x02047C94, (int)ce9->patches->musicPlay); // Play video
+	}
+
+	// System Flaw: Recruit (Europe)
+	// Requires 8MB of RAM
+	else if (strcmp(romTid, "KSYP") == 0 && extendedMemory) {
+		setBL(0x0200D84C, (int)ce9->patches->musicPlay); // Play video
+		setBL(0x0200DAAC, (u32)dsiSaveOpen);
+		setBL(0x0200DB00, (u32)dsiSaveGetLength);
+		setBL(0x0200DB10, (u32)dsiSaveRead);
+		setBL(0x0200DB18, (u32)dsiSaveClose);
+		setBL(0x0200DB54, (u32)dsiSaveOpen);
+		*(u32*)0x0200DB6C = 0xE1A00000; // nop (dsiSaveGetArcSrc)
+		*(u32*)0x0200DB7C = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
+		setBL(0x0200DB98, (u32)dsiSaveCreate);
+		setBL(0x0200DBA4, (u32)dsiSaveClose);
+		setBL(0x0200DBB4, (u32)dsiSaveOpen);
+		setBL(0x0200DC08, (u32)dsiSaveSetLength);
+		setBL(0x0200DC18, (u32)dsiSaveWrite);
+		setBL(0x0200DC20, (u32)dsiSaveClose);
+		*(u32*)0x0202652C = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02028634 = 0xE1A00000; // nop
+		*(u32*)0x0202BCAC = 0xE1A00000; // nop
+		patchInitDSiWare(0x020315C4, heapEnd);
+		*(u32*)0x02031950 = *(u32*)0x02004FD0;
+	}
+
 	// Tales to Enjoy!: Little Red Riding Hood (USA)
 	// Tales to Enjoy!: Puss in Boots (USA)
 	// Tales to Enjoy!: The Three Little Pigs (USA)
@@ -24482,7 +24841,7 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 	else if (strcmp(romTid, "KZUE") == 0 || strcmp(romTid, "KZVE") == 0 || strcmp(romTid, "KZ7E") == 0 || strcmp(romTid, "KZ8E") == 0) {
 		*(u32*)0x02006F60 = 0xE1A00000; // nop
 		*(u32*)0x0200A80C = 0xE1A00000; // nop
-		patchInitDSiWare(0x0200FE40, heapEndMaxForRetail);
+		patchInitDSiWare(0x0200FE40, heapEndMaxForRetail32);
 		*(u32*)0x020101CC = *(u32*)0x02004FE8;
 		patchUserSettingsReadDSiWare(0x02011470);
 		setBL(0x0204D500, (u32)dsiSaveOpen);
@@ -25998,6 +26357,44 @@ void patchDSiModeToDSMode(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
 		if (!extendedMemory) {
 			*(u32*)0x02061994 = 0x50000; // Shrink large part of heap from 0xF0000
 			*(u32*)0x02061A08 = 0x80000; // Shrink large part of heap from 0x100000
+		}
+	}
+
+	// G.G Series: Wonder Land (Japan)
+	else if (strcmp(romTid, "KWLJ") == 0) {
+		*(u32*)0x02007210 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x02007214 = 0xE12FFF1E; // bx lr
+		setBL(0x0200727C, (u32)dsiSaveGetInfo);
+		*(u32*)0x02007294 = 0xE3A00001; // mov r0, #1 (dsiSaveGetArcSrc)
+		*(u32*)0x020072AC = 0xE3A00001; // mov r0, #1 (dsiSaveFreeSpaceAvailable)
+		setBL(0x020072C0, (u32)dsiSaveCreate);
+		setBL(0x02007394, (u32)dsiSaveGetInfo);
+		setBL(0x020073BC, (u32)dsiSaveGetInfo);
+		setBL(0x02007474, (u32)dsiSaveOpen);
+		setBL(0x0200749C, (u32)dsiSaveSetLength);
+		setBL(0x020074B8, (u32)dsiSaveWrite);
+		setBL(0x020074C0, (u32)dsiSaveWrite); // dsiSaveWriteAsync
+		setBL(0x02007504, (u32)dsiSaveClose);
+		setBL(0x0200755C, (u32)dsiSaveOpen);
+		setBL(0x0200757C, (u32)dsiSaveGetLength);
+		setBL(0x0200758C, (u32)dsiSaveClose);
+		setBL(0x020075AC, (u32)dsiSaveRead);
+		setBL(0x020075B8, (u32)dsiSaveRead); // dsiSaveReadAsync
+		setBL(0x020075FC, (u32)dsiSaveClose);
+		*(u32*)0x020078F8 = 0xE3A00000; // mov r0, #0
+		*(u32*)0x020078FC = 0xE12FFF1E; // bx lr
+		*(u32*)0x02008184 = 0xE1A00000; // nop
+		*(u32*)0x0204003C = 0xE1A00000; // nop
+		tonccpy((u32*)0x02040CD0, dsiSaveGetResultCode, 0xC);
+		*(u32*)0x0204409C = 0xE1A00000; // nop
+		*(u32*)0x0204C300 = 0xE3A00001; // mov r0, #1
+		patchInitDSiWare(0x0204C318, heapEnd);
+		if (!extendedMemory) {
+			*(u32*)0x0204C688 -= 0x3A000;
+		}
+		patchUserSettingsReadDSiWare(0x0204DAD0);
+		if (!extendedMemory) {
+			*(u32*)0x0205C110 = 0x50000; // Shrink large part of heap from 0xF0000
 		}
 	}
 

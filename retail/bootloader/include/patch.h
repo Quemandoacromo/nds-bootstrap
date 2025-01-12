@@ -50,7 +50,7 @@
 
 //extern bool cardReadFound; // patch_arm9.c
 
-#define patchOffsetCacheFileVersion 45	// Change when new functions are being patched, some offsets removed,
+#define patchOffsetCacheFileVersion 50	// Change when new functions are being patched, some offsets removed,
 										// the offset order changed, and/or the function signatures changed (not added)
 
 typedef struct patchOffsetCacheContents {
@@ -63,11 +63,18 @@ typedef struct patchOffsetCacheContents {
 	u32 a9IsThumb;
     u32* cardReadStartOffset;
     u32* cardReadEndOffset;
+    u32* cardSaveCmdOffset;
     u32* cardPullOutOffset;
     u32* cardIdOffset;
     u32 cardIdChecked;
     u32* cardReadDmaOffset;
+    u32* cardReadDmaEndOffset;
     u32 cardReadDmaChecked;
+    u32* cardSetDmaOffset;
+    u32 cardSetDmaChecked;
+    u32* cardEndReadDmaOffset;
+    u32 cardEndReadDmaChecked;
+    u32 dmaHandlerOffset;
 	u32* fileIoOpenOffset;
 	u32* fileIoCloseOffset;
 	u32* fileIoSeekOffset;
@@ -75,8 +82,9 @@ typedef struct patchOffsetCacheContents {
 	u32* initLockEndOffset;
 	u32* a9CardIrqEnableOffset;
 	u32 a9CardIrqIsThumb;
+	u32* srlStartOffset9;
+	u32 srlStartOffsetChecked;
 	u32* resetOffset;
-	u32 resetMb;
 	u32 resetChecked;
 	u32* nandTmpJumpFuncOffset;
 	u32 nandTmpJumpFuncChecked;
@@ -109,6 +117,7 @@ typedef struct patchOffsetCacheContents {
 	u32* swiGetPitchTableOffset;
 	u32 swiGetPitchTableChecked;
 	u32* sleepPatchOffset;
+	u32* sleepInputWriteOffset;
 	u32* postBootOffset;
 	u32* a7CardIrqEnableOffset;
 	u32* a7IrqHandlerOffset;
@@ -133,7 +142,7 @@ u32* getOffsetFromBL(u32* blOffset);
 u32* getOffsetFromBLX(u32* blxOffset);
 const u16* generateA7InstrThumb(int arg1, int arg2);
 void setBLThumb(int arg1, int arg2);
-u16* getOffsetFromBLThumb(u16* blOffset);
+u16* getOffsetFromBLThumb(const u16* blOffset);
 void codeCopy(u32* dst, u32* src, u32 len);
 void patchBinary(cardengineArm9* ce9, const tNDSHeader* ndsHeader, module_params_t* moduleParams);
 u32 patchCardNdsArm9(
