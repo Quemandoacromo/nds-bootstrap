@@ -20,6 +20,7 @@
 #include <nds/ndstypes.h>
 #include <nds/arm9/exceptions.h>
 #include <nds/arm9/cache.h>
+#include <nds/arm9/video.h>
 #include <nds/bios.h>
 #include <nds/system.h>
 #include <nds/dma.h>
@@ -50,8 +51,10 @@
 #define slowSoftReset BIT(10)
 #define dsiBios BIT(11)
 #define asyncCardRead BIT(12)
-#define softResetMb BIT(13)
+#define useSharedWram BIT(13)
 #define cloneboot BIT(14)
+#define fntFatCached BIT(17)
+#define waitForPreloadToFinish BIT(18)
 
 //#ifdef DLDI
 #include "my_fat.h"
@@ -108,11 +111,11 @@ aFile* sharedFontFile = (aFile*)FONT_FILE_LOCATION_TWLSDK;
 tNDSHeader* ndsHeader = (tNDSHeader*)NDS_HEADER_SDK5;
 #else
 tNDSHeader* ndsHeader = (tNDSHeader*)NDS_HEADER;
-#endif
+#endif // GSDD
 aFile* romFile = (aFile*)ROM_FILE_LOCATION_MAINMEM;
 aFile* savFile = (aFile*)SAV_FILE_LOCATION_MAINMEM;
 aFile* apFixOverlaysFile = (aFile*)OVL_FILE_LOCATION_MAINMEM;
-#endif
+#endif // TWLSDK
 //static aFile* gbaFile = (aFile*)GBA_FILE_LOCATION_MAINMEM;
 //static aFile* gbaSavFile = (aFile*)GBA_SAV_FILE_LOCATION_MAINMEM;
 #ifndef DLDI
@@ -123,13 +126,23 @@ u32 cacheDescriptor[dev_CACHE_SLOTS_16KB_TWLSDK];
 int cacheCounter[dev_CACHE_SLOTS_16KB_TWLSDK];
 #else
 u32* cacheAddressTable = (u32*)CACHE_ADDRESS_TABLE_LOCATION;
-u32 cacheDescriptor[dev_CACHE_SLOTS_16KB];
-int cacheCounter[dev_CACHE_SLOTS_16KB];
-#endif
+u32* cacheDescriptor = (u32*)CACHE_DESCRIPTOR_TABLE_LOCATION;
+int* cacheCounter = (int*)CACHE_COUNTER_TABLE_LOCATION;
+#endif // TWLSDK
 int accessCounter = 0;
-#endif
+#ifdef ASYNCPF
+static u32 asyncSector = 0;
+//static u32 asyncQueue[5];
+//static int aQHead = 0;
+//static int aQTail = 0;
+//static int aQSize = 0;
+#endif // ASYNCPF
+#endif // DLDI
 bool flagsSet = false;
+bool romPart = false;
+#ifdef DLDI
 static bool driveInitialized = false;
+#endif
 /* #ifndef TWLSDK
 static bool region0FixNeeded = false;
 #endif */
@@ -185,7 +198,7 @@ void sleepMs(int ms) {
 	}
 }*/
 
-/* #ifdef TWLSDK
+#ifdef TWLSDK
 void resetSlots(void) {
 	for (int i = 0; i < ce9->cacheSlots; i++) {
 		cacheDescriptor[i] = 0;
@@ -193,7 +206,7 @@ void resetSlots(void) {
 	}
 	accessCounter = 0;
 }
-#endif */
+#endif
 
 int allocateCacheSlot(void) {
 	int slot = 0;
@@ -241,6 +254,99 @@ void updateDescriptor(int slot, u32 sector) {
 	cacheDescriptor[slot] = sector;
 	cacheCounter[slot] = accessCounter;
 }
+
+#ifdef ASYNCPF
+void addToAsyncQueue(u32 sector) {
+	asyncQueue[aQHead] = sector;
+	aQHead++;
+	aQSize++;
+	if(aQHead>4) {
+		aQHead=0;
+	}
+	if(aQSize>5) {
+		aQSize=5;
+		aQTail++;
+		if(aQTail>4) aQTail=0;
+	}
+}
+
+u32 popFromAsyncQueueHead() {	
+	if(aQSize>0) {
+	
+		aQHead--;
+		if(aQHead == -1) aQHead = 4;
+		aQSize--;
+		
+		return asyncQueue[aQHead];
+	} else return 0;
+}
+
+void triggerAsyncPrefetch(u32 src, u32 sector) {	
+	if (asyncSector == 0) {
+		return;
+	}
+	int slot = getSlotForSector(sector);
+	// read max 32k via the WRAM cache
+	// do it only if there is no async command ongoing
+	if(slot==-1) {
+		//addToAsyncQueue(sector);
+		// send a command to the arm7 to fill the main RAM cache
+		const u32 commandRead = (isDma ? 0x020FF80A : 0x020FF808);
+
+		slot = allocateCacheSlot();
+
+		vu8* buffer = getCacheAddress(slot);
+
+		cacheDescriptor[slot] = sector;
+		cacheCounter[slot] = 0x0FFFFFFF; // async marker
+		asyncSector = sector;
+
+		DC_InvalidateRange((u32*)buffer, ce9->cacheBlockSize);
+
+		// write the command
+		sharedAddr[0] = (vu32)buffer;
+		sharedAddr[1] = ce9->cacheBlockSize;
+		sharedAddr[2] = ((ce9->valueBits & overlaysCached) && src >= newOverlayOffset && src < newOverlayOffset+newOverlaysSize) ? sector+0x80000000 : sector;
+		sharedAddr[3] = commandRead;
+
+		// IPC_SendSync(0x4);
+
+		// do it asynchronously
+		/*waitForArm7();*/
+	}	
+}
+
+void processAsyncCommand() {
+	if (asyncSector == 0) {
+		return;
+	}
+	int slot = getSlotForSector(asyncSector);
+	if(slot!=-1 && cacheCounter[slot] == 0x0FFFFFFF) {
+		// get back the data from arm7
+		if(sharedAddr[3] == (vu32)0) {
+			updateDescriptor(slot, asyncSector);
+			asyncSector = 0;
+		}			
+	}	
+}
+
+void getAsyncSector() {
+	if (asyncSector == 0) {
+		return;
+	}
+	int slot = getSlotForSector(asyncSector);
+	if(slot!=-1 && cacheCounter[slot] == 0x0FFFFFFF) {
+		// get back the data from arm7
+		const u32 commandRead = (isDma ? 0x020FF80A : 0x020FF808);
+		while (sharedAddr[3] == commandRead) {
+			sleepMs(1);
+		}
+
+		updateDescriptor(slot, asyncSector);
+		asyncSector = 0;
+	}
+}
+#endif
 #endif
 
 /*static void sleep(u32 ms) {
@@ -255,16 +361,28 @@ void updateDescriptor(int slot, u32 sector) {
 
 extern void setExceptionHandler2();
 
+/* static inline bool isPreloadFinished(void) {
+	return (sharedAddr[5] == 0x44454C50); // 'PLED'
+} */
+
 static inline void waitForArm7(void) {
 	IPC_SendSync(0x4);
 	while (sharedAddr[3] != (vu32)0) {
-		swiDelay(100);
+		#ifdef DLDI
+		swiDelay(50);
+		#else
+		sleepMs(1);
+		if (sharedAddr[5] == 0x474E4950) { // 'PING'
+			sharedAddr[5] = 0;
+			IPC_SendSync(0x4);
+		}
+		#endif
 	}
 }
 
 #ifndef DLDI
 static inline bool checkArm7(void) {
-    IPC_SendSync(0x4);
+	// IPC_SendSync(0x4);
 	return (sharedAddr[3] == (vu32)0);
 }
 #endif
@@ -314,23 +432,12 @@ volatile void (*FS_Write)(u32*, u32, u32) = (volatile void*)0x0203C5C8;*/
 #endif
 #endif
 
-#ifndef DLDI
-static u32 newOverlayOffset = 0;
-static u32 newOverlaysSize = 0;
-#endif
-
 static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 #ifdef DLDI
-	while (sharedAddr[3]==0x444D4152);	// Wait during a RAM dump
+	// while (sharedAddr[3]==0x444D4152);	// Wait during a RAM dump
 	fileRead((char*)dst, ((ce9->valueBits & overlaysCached) && src >= ce9->overlaysSrc && src < ndsHeader->arm7romOffset) ? apFixOverlaysFile : romFile, src, len);
 #else
-	if (newOverlayOffset == 0) {
-		newOverlayOffset = (ce9->overlaysSrc/ce9->cacheBlockSize)*ce9->cacheBlockSize;
-		for (u32 i = newOverlayOffset; i < ndsHeader->arm7romOffset; i+= ce9->cacheBlockSize) {
-			newOverlaysSize += ce9->cacheBlockSize;
-		}
-	}
-
+	const u32 commandRead = (isDma ? 0x025FFB09 : 0x025FFB08);
 	u32 sector = (src/ce9->cacheBlockSize)*ce9->cacheBlockSize;
 
 	accessCounter++;
@@ -344,7 +451,16 @@ static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 	//}
 
 	/* if ((ce9->valueBits & cacheDisabled) && (u32)dst >= 0x02000000 && (u32)dst < 0x03000000) {
-		fileRead((char*)dst, ((ce9->valueBits & overlaysCached) && src >= newOverlayOffset && src < newOverlayOffset+newOverlaysSize) ? apFixOverlaysFile : romFile, src, len);
+		DC_InvalidateRange((u32*)dst, len);
+
+		// Write the command
+		sharedAddr[0] = (vu32)dst;
+		sharedAddr[1] = len;
+		sharedAddr[2] = ((ce9->valueBits & overlaysCached) && src >= ce9->overlaysSrc && src < ndsHeader->arm7romOffset) ? src+0x80000000 : src;
+		sharedAddr[3] = commandRead;
+
+		waitForArm7();
+		// fileRead((char*)dst, ((ce9->valueBits & overlaysCached) && src >= ce9->overlaysSrcAlign && src < ce9->overlaysSrcAlign+ce9->overlaysSizeAlign) ? apFixOverlaysFile : romFile, src, len);
 	} else { */
 		// Read via the main RAM cache
 		//bool runSleep = true;
@@ -374,7 +490,21 @@ static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 					readLen = ce9->cacheBlockSize*2;
 				}*/
 
-				fileRead((char*)buffer, ((ce9->valueBits & overlaysCached) && src >= newOverlayOffset && src < newOverlayOffset+newOverlaysSize) ? apFixOverlaysFile : romFile, sector, ce9->cacheBlockSize);
+				DC_InvalidateRange((u32*)buffer, ce9->cacheBlockSize);
+
+				// Write the command
+				sharedAddr[0] = (vu32)buffer;
+				sharedAddr[1] = ce9->cacheBlockSize;
+				sharedAddr[2] = ((ce9->valueBits & overlaysCached) && src >= ce9->overlaysSrcAlign && src < ce9->overlaysSrcAlign+ce9->overlaysSizeAlign) ? sector+0x80000000 : sector;
+				sharedAddr[3] = commandRead;
+
+				waitForArm7();
+
+				#ifdef ASYNCPF
+				updateDescriptor(slot, sector);
+				#endif
+
+				// fileRead((char*)buffer, ((ce9->valueBits & overlaysCached) && src >= ce9->overlaysSrcAlign && src < ce9->overlaysSrcAlign+ce9->overlaysSizeAlign) ? apFixOverlaysFile : romFile, sector, ce9->cacheBlockSize);
 				/*updateDescriptor(slot, sector);
 				if (readLen >= ce9->cacheBlockSize*2) {
 					updateDescriptor(slot+1, sector+ce9->cacheBlockSize);
@@ -387,9 +517,7 @@ static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 				}*/
 
 				#ifdef ASYNCPF
-				if (REG_IME != 0 && REG_IF != 0) {
-					triggerAsyncPrefetch(nextSector);
-				}
+				triggerAsyncPrefetch(src + ce9->cacheBlockSize, nextSector);
 				#endif
 				//runSleep = false;
 			} else {
@@ -398,7 +526,7 @@ static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 					// prefetch successfull
 					getAsyncSector();
 
-					triggerAsyncPrefetch(nextSector);
+					triggerAsyncPrefetch(src + ce9->cacheBlockSize, nextSector);
 				} /*else {
 					int i;
 					for(i=0; i<5; i++) {
@@ -409,10 +537,9 @@ static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 						}
 					}
 				}*/
+				updateDescriptor(slot, sector);
 				#endif
-				//updateDescriptor(slot, sector);
 			}
-			updateDescriptor(slot, sector);
 
 			//getSdatAddr(sector, (u32)buffer);
 
@@ -421,19 +548,23 @@ static inline void cardReadNormal(u8* dst, u32 src, u32 len) {
 				len2 = sector - src + ce9->cacheBlockSize;
 			}
 
-    		#ifdef DEBUG
-    		// Send a log command for debug purpose
-    		// -------------------------------------
-   			commandRead = 0x026ff800;
+			#ifndef ASYNCPF
+			updateDescriptor(slot, sector);
+			#endif
 
-    		sharedAddr[0] = dst;
-    		sharedAddr[1] = len2;
-    		sharedAddr[2] = buffer+src-sector;
-    		sharedAddr[3] = commandRead;
+			#ifdef DEBUG
+			// Send a log command for debug purpose
+			// -------------------------------------
+			commandRead = 0x026ff800;
 
-    		waitForArm7();
-    		// -------------------------------------
-    		#endif
+			sharedAddr[0] = dst;
+			sharedAddr[1] = len2;
+			sharedAddr[2] = buffer+src-sector;
+			sharedAddr[3] = commandRead;
+
+			waitForArm7();
+			// -------------------------------------
+			#endif
 
     		// Copy directly
 			/*if (isDma) {
@@ -500,24 +631,34 @@ static inline void cardReadRAM(u8* dst, u32 src, u32 len/*, int romPartNo*/) {
 	tonccpy(dst, (u8*)newSrc, len);
 	#else
 	// tonccpy(dst, (u8*)ce9->romLocation/*[romPartNo]*/+src, len);
-	u32 len2 = 0;
-	for (int i = 0; i < ce9->romMapLines; i++) {
-		if (!(src >= ce9->romMap[i][0] && (i == ce9->romMapLines-1 || src < ce9->romMap[i+1][0])))
-			continue;
-
-		u32 newSrc = (ce9->romMap[i][1]-ce9->romMap[i][0])+src;
-		if (newSrc+len > ce9->romMap[i][2]) {
-			do {
-				len--;
-				len2++;
-			} while (newSrc+len != ce9->romMap[i][2]);
-			tonccpy(dst, (u8*)newSrc, len);
-			src += len;
-			dst += len;
-		} else {
-			tonccpy(dst, (u8*)newSrc, len2==0 ? len : len2);
+	u32 newSrc = 0;
+	u32 newLen = 0;
+	bool srcFound = false;
+	int i = 0;
+	for (i = 0; i < ce9->romMapLines; i++) {
+		if (src >= ce9->romMap[i][0] && (i == ce9->romMapLines-1 || src < ce9->romMap[i+1][0])) {
+			srcFound = true;
 			break;
 		}
+	}
+	if (!srcFound) {
+		toncset(dst, 0, len); // Fill dst with 0 if ROM area is not within the map
+		return;
+	}
+	if (ce9->valueBits & useSharedWram) {
+		WRAM_CR = 0; // Set shared WRAM to ARM9
+	}
+	while (len > 0) {
+		newSrc = (ce9->romMap[i][1]-ce9->romMap[i][0])+src;
+		newLen = len;
+		while (newSrc+newLen > ce9->romMap[i][2]) {
+			newLen--;
+		}
+		tonccpy(dst, (u8*)newSrc, newLen);
+		src += newLen;
+		dst += newLen;
+		len -= newLen;
+		i++;
 	}
 	#endif
 }
@@ -529,7 +670,7 @@ bool isNotTcm(u32 address, u32 len) {
     // test data not in DTCM
     && (address < base || address> base+0x4000)
     && (address+len < base || address+len> base+0x4000);
-}  
+}
 
 #ifndef TWLSDK
 #ifndef GSDD
@@ -614,6 +755,11 @@ void cardRead(u32* cacheStruct, u8* dst0, u32 src0, u32 len0) {
 	u32 src = src0;
 	u8* dst = dst0;
 	u32 len = len0;
+
+	if (src == ndsHeader->romSize) {
+		tonccpy(dst, (u8*)0x027FFEC0, len); // Load pre-loaded RSA key
+		return;
+	}
 	#else
 	initialize();
 
@@ -626,6 +772,11 @@ void cardRead(u32* cacheStruct, u8* dst0, u32 src0, u32 len0) {
 	u32 src = ((ce9->valueBits & isSdk5) ? src0 : cardStruct[0]);
 	u8* dst = ((ce9->valueBits & isSdk5) ? dst0 : (u8*)(cardStruct[1]));
 	u32 len = ((ce9->valueBits & isSdk5) ? len0 : cardStruct[2]);
+
+	if ((ce9->valueBits & isSdk5) && (src == ndsHeader->romSize)) {
+		tonccpy(dst, (u8*)0x027FFEC0, len); // Load pre-loaded RSA key
+		return;
+	}
 	#endif
 	#endif
 
@@ -635,10 +786,12 @@ void cardRead(u32* cacheStruct, u8* dst0, u32 src0, u32 len0) {
 			region0Fix();
 		}
 		#endif */
+		#ifdef DLDI
 		if (!driveInitialized) {
 			FAT_InitFiles(false);
 			driveInitialized = true;
 		}
+		#endif
 		if (ce9->valueBits & enableExceptionHandler) {
 			setExceptionHandler2();
 		}
@@ -680,23 +833,42 @@ void cardRead(u32* cacheStruct, u8* dst0, u32 src0, u32 len0) {
 	}
 	#endif
 
-	bool romPart = false;
+	romPart = false;
 	//int romPartNo = 0;
 	if (!(ce9->valueBits & ROMinRAM)) {
-		/*for (int i = 0; i < 2; i++) {
+		#ifndef TWLSDK
+		for (int i = 0; i < 4; i++) {
 			if (ce9->romPartSize[i] == 0) {
 				break;
 			}
 			romPart = (src >= ce9->romPartSrc[i] && src < ce9->romPartSrc[i]+ce9->romPartSize[i]);
 			if (romPart) {
-				romPartNo = i;
+				// romPartNo = i;
 				break;
 			}
-		}*/
-		romPart = (ce9->romPartSize > 0 && src >= ce9->romPartSrc && src < ce9->romPartSrc+ce9->romPartSize);
+		}
+		#else
+		romPart = (ce9->romPartSize[0] > 0 && src >= ce9->romPartSrc[0] && src < ce9->romPartSrc[0]+ce9->romPartSize[0]);
+		#endif
+		/* #ifndef DLDI
+		#ifndef TWLSDK
+		if (romPart && (ce9->valueBits & waitForPreloadToFinish)) {
+			if (isPreloadFinished()) {
+				sharedAddr[5] = 0;
+				ce9->valueBits &= ~waitForPreloadToFinish;
+			} else {
+				romPart = false;
+			}
+		}
+		#endif
+		#endif */
 	}
 	if ((ce9->valueBits & ROMinRAM) || romPart) {
 		cardReadRAM(dst, src, len/*, romPartNo*/);
+	#ifndef TWLSDK
+	} else if ((ce9->valueBits & fntFatCached) && src >= ce9->fntSrc && src < ce9->fntSrc+ce9->fntFatSize) {
+		tonccpy(dst, (u8*)((0x03700000-ce9->fntSrc)+src), len);
+	#endif
 	} else {
 		cardReadNormal(dst, src, len);
 	}
@@ -716,22 +888,21 @@ bool nandRead(void* memory,void* flash,u32 len,u32 dma) {
 #ifdef DLDI
 	if (ce9->valueBits & saveOnFlashcard) {
 		fileRead(memory, savFile, (u32)flash, len);
-		return true;
-	} else {
-		// Send a command to the ARM7 to read the nand save
-		u32 commandNandRead = 0x025FFC01;
-
-		// Write the command
-		sharedAddr[0] = (u32)memory;
-		sharedAddr[1] = len;
-		sharedAddr[2] = (u32)flash;
-		sharedAddr[3] = commandNandRead;
-
-		waitForArm7();
+		return true; 
 	}
-#else
-	fileRead(memory, savFile, (u32)flash, len);
 #endif
+	DC_InvalidateRange(memory, len);
+
+	// Send a command to the ARM7 to read the nand save
+	const u32 commandNandRead = 0x025FFC01;
+
+	// Write the command
+	sharedAddr[0] = (u32)memory;
+	sharedAddr[1] = len;
+	sharedAddr[2] = (u32)flash;
+	sharedAddr[3] = commandNandRead;
+
+	waitForArm7();
     return true; 
 }
 
@@ -740,21 +911,20 @@ bool nandWrite(void* memory,void* flash,u32 len,u32 dma) {
 	if (ce9->valueBits & saveOnFlashcard) {
 		fileWrite(memory, savFile, (u32)flash, len);
 		return true;
-	} else {
-		// Send a command to the ARM7 to write the nand save
-		u32 commandNandWrite = 0x025FFC02;
-
-		// Write the command
-		sharedAddr[0] = (u32)memory;
-		sharedAddr[1] = len;
-		sharedAddr[2] = (u32)flash;
-		sharedAddr[3] = commandNandWrite;
-
-		waitForArm7();
 	}
-#else
-	fileWrite(memory, savFile, (u32)flash, len);
 #endif
+	DC_FlushRange(memory, len);
+
+	// Send a command to the ARM7 to write the nand save
+	const u32 commandNandWrite = 0x025FFC02;
+
+	// Write the command
+	sharedAddr[0] = (u32)memory;
+	sharedAddr[1] = len;
+	sharedAddr[2] = (u32)flash;
+	sharedAddr[3] = commandNandWrite;
+
+	waitForArm7();
     return true; 
 }
 
@@ -786,7 +956,7 @@ static void dsiSaveInit(void) {
 	u32 existByte = 0;
 
 	int oldIME = enterCriticalSection();
-	u16 exmemcnt = REG_EXMEMCNT;
+	const u16 exmemcnt = REG_EXMEMCNT;
 	sysSetCardOwner(true);	// Give Slot-1 access to arm9
 	fileRead((char*)&dsiSaveSize, savFile, ce9->saveSize-4, 4);
 	fileRead((char*)&existByte, savFile, ce9->saveSize-8, 4);
@@ -851,7 +1021,7 @@ bool dsiSaveCreate(const char* path, u32 permit) {
 		u32 existByte = 1;
 
 		int oldIME = enterCriticalSection();
-		u16 exmemcnt = REG_EXMEMCNT;
+		const u16 exmemcnt = REG_EXMEMCNT;
 		sysSetCardOwner(true);	// Give Slot-1 access to arm9
 		fileWrite((char*)&existByte, savFile, ce9->saveSize-8, 4);
 		REG_EXMEMCNT = exmemcnt;
@@ -878,7 +1048,7 @@ bool dsiSaveDelete(const char* path) {
 		dsiSaveSize = 0;
 
 		int oldIME = enterCriticalSection();
-		u16 exmemcnt = REG_EXMEMCNT;
+		const u16 exmemcnt = REG_EXMEMCNT;
 		sysSetCardOwner(true);	// Give Slot-1 access to arm9
 		fileWrite((char*)&dsiSaveSize, savFile, ce9->saveSize-4, 4);
 		fileWrite((char*)&dsiSaveSize, savFile, ce9->saveSize-8, 4);
@@ -938,7 +1108,7 @@ u32 dsiSaveSetLength(void* ctx, s32 len) {
 	dsiSaveSize = len;
 
 	int oldIME = enterCriticalSection();
-	u16 exmemcnt = REG_EXMEMCNT;
+	const u16 exmemcnt = REG_EXMEMCNT;
 	sysSetCardOwner(true);	// Give Slot-1 access to arm9
 	bool res = fileWrite((char*)&dsiSaveSize, savFile, ce9->saveSize-4, 4);
 	dsiSaveResultCode = res ? 0 : 1;
@@ -1094,7 +1264,7 @@ s32 dsiSaveRead(void* ctx, void* dst, u32 len) {
 	}
 
 	int oldIME = enterCriticalSection();
-	u16 exmemcnt = REG_EXMEMCNT;
+	const u16 exmemcnt = REG_EXMEMCNT;
 	sysSetCardOwner(true);	// Give Slot-1 access to arm9
 	bool res = fileRead(dst, sharedFontOpened ? sharedFontFile : savFile, dsiSaveSeekPos, len);
 	dsiSaveResultCode = res ? 0 : 1;
@@ -1127,7 +1297,7 @@ s32 dsiSaveWrite(void* ctx, void* src, s32 len) {
 	}
 
 	int oldIME = enterCriticalSection();
-	u16 exmemcnt = REG_EXMEMCNT;
+	const u16 exmemcnt = REG_EXMEMCNT;
 	sysSetCardOwner(true);	// Give Slot-1 access to arm9
 	bool res = fileWrite(src, savFile, dsiSaveSeekPos, len);
 	dsiSaveResultCode = res ? 0 : 1;
@@ -1139,7 +1309,7 @@ s32 dsiSaveWrite(void* ctx, void* src, s32 len) {
 			dsiSaveSize = dsiSaveSeekPos+len;
 
 			int oldIME = enterCriticalSection();
-			u16 exmemcnt = REG_EXMEMCNT;
+			const u16 exmemcnt = REG_EXMEMCNT;
 			sysSetCardOwner(true);	// Give Slot-1 access to arm9
 			fileWrite((char*)&dsiSaveSize, savFile, ce9->saveSize-4, 4);
 			REG_EXMEMCNT = exmemcnt;
@@ -1189,12 +1359,15 @@ void inGameMenu(s32* exRegisters) {
 		while (REG_VCOUNT == 191) swiDelay(100);
 	}
 
-	*(u32*)(INGAME_MENU_LOCATION + IGM_TEXT_SIZE_ALIGNED) = (u32)sharedAddr;
 	#ifndef TWLSDK
-	*(u32*)((u32)INGAME_MENU_LOCATION + IGM_TEXT_SIZE_ALIGNED + 4) = 0x027FEFF4;
+	if (ce9->valueBits & useSharedWram) {
+		WRAM_CR = 0; // Set shared WRAM to ARM9
+	}
 	#endif
-	volatile void (*inGameMenu)(s32*, u32, s32*) = (volatile void*)INGAME_MENU_LOCATION + IGM_TEXT_SIZE_ALIGNED + 0x10;
-	(*inGameMenu)(&ce9->mainScreen, ce9->consoleModel, exRegisters);
+
+	*(u32*)(INGAME_MENU_LOCATION + IGM_TEXT_SIZE_ALIGNED) = (u32)sharedAddr;
+	volatile u32 (*inGameMenu)(s32*, u32, s32*) = (volatile void*)INGAME_MENU_LOCATION + IGM_TEXT_SIZE_ALIGNED + 0x10;
+	const u32 res = (*inGameMenu)(&ce9->mainScreen, ce9->consoleModel, exRegisters);
 
 	while (sharedAddr[5] != 0x4C4D4749) { // 'IGML'
 		while (REG_VCOUNT != 191) swiDelay(100);
@@ -1206,7 +1379,7 @@ void inGameMenu(s32* exRegisters) {
 	}
 
 	#ifdef TWLSDK
-	if (sharedAddr[3] == 0x54495845) {
+	if (res == 0x54495845) {
 		igmReset = true;
 		if (*(u32*)0x02FFE234 == 0x00030004 || *(u32*)0x02FFE234 == 0x00030005) {
 			reset(0, 0);
@@ -1215,7 +1388,7 @@ void inGameMenu(s32* exRegisters) {
 		}
 	} else
 	#endif
-	if (sharedAddr[3] == 0x52534554) {
+	if (res == 0x52534554) {
 		igmReset = true;
 	#ifdef TWLSDK
 		if (*(u32*)0x02FFE234 == 0x00030004 || *(u32*)0x02FFE234 == 0x00030005) { // If DSiWare...
@@ -1255,24 +1428,15 @@ void myIrqHandlerIPC(void) {
 #ifndef GSDD
 	switch (IPC_GetSync()) {
 		case 0x3:
-		#ifndef TWLSDK
 			extern bool dmaDirectRead;
 		if (dmaDirectRead) {
 			endCardReadDma();
-		}
-		#endif
+		} else { // new dma method
 #ifndef DLDI
-		#ifndef TWLSDK
-		else if (ce9->patches->cardEndReadDmaRef || ce9->thumbPatches->cardEndReadDmaRef) { // new dma method
 			continueCardReadDmaArm7();
+#endif
 			continueCardReadDmaArm9();
 		}
-		#endif
-#endif
-			break;
-		case 0x4:
-			extern bool dmaOn;
-			dmaOn = !dmaOn;
 			break;
 		case 0x5:
 			igmReset = true;
