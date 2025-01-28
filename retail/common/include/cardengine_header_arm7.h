@@ -46,7 +46,6 @@ typedef struct cardengineArm7Patches {
     u32* j_irqHandler;
     u32 vblankHandler;
     u32 fifoHandler;
-    u32 ndma0Handler;
     u32 card_pull;
     cardengineArm7PatchesArm7FunctionsThumb* arm7FunctionsDirect;
     cardengineArm7PatchesArm7Functions* arm7Functions;
@@ -56,8 +55,11 @@ typedef struct cardengineArm7Patches {
     u32* swi25;
     u32* swi26;
     u32* swi27;
+    u32* j_newSwiHalt;
+    u32* newSwiHaltThumb;
     u32* j_twlGetPitchTable;
     u32* j_twlGetPitchTableThumb;
+	u32* reset;
 } cardengineArm7Patches;
 
 //
@@ -68,7 +70,7 @@ typedef struct cardengineArm7 {
     cardengineArm7Patches* patches;
     u32 intr_vblank_orig_return;
     u32 intr_fifo_orig_return;
-    u32 intr_ndma0_orig_return;
+	u32 cheatEngineAddr;
     const module_params_t* moduleParams;
     u32 fileCluster;
     u32 patchOffsetCacheFileCluster;
@@ -82,19 +84,19 @@ typedef struct cardengineArm7 {
 	/*
 		0: gameOnFlashcard
 		1: saveOnFlashcard
-		2: extendedMemory
+		2: eSdk2
 		3: ROMinRAM
 		4: dsiMode
 		5: dsiSD
 		6: preciseVolumeControl
 		7: powerCodeOnVBlank
-		8: runCardEngineCheck
+		8: delayWrites
 		9: igmAccessible
 		10: hiyaCfwFound
 		11: slowSoftReset
 		12: wideCheatUsed
 		13: isSdk5
-		14: asyncCardRead
+		14: hasVramWifiBinary
 		15: twlTouch
 		16: cloneboot
 		17: sleepMode
@@ -102,6 +104,7 @@ typedef struct cardengineArm7 {
 		19: bootstrapOnFlashcard
 		20: ndmaDisabled
 		21: isDlp
+		30: i2cBricked
 		31: scfgLocked
 	*/
     s32 mainScreen;
@@ -114,8 +117,12 @@ typedef struct cardengineArm7 {
     u16 scfgRomBak;
     u16 igmHotkey;
 	u32 romLocation;
+	u32 romPartLocation;
+	u32 romPartSrc;
+	u32 romPartSize;
+	u32 romPartFrame;
 	u32 romMapLines;
-	u32 romMap[4][3]; // 0: ROM part start, 1: ROM part start in RAM, 2: ROM part end in RAM
+	u32 romMap[8][3]; // 0: ROM part start, 1: ROM part start in RAM, 2: ROM part end in RAM
 } cardengineArm7;
 
 //
@@ -125,12 +132,15 @@ typedef struct cardengineArm7B4DS {
 	u32 ce7;
 	cardengineArm7Patches* patches;
 	u32 intr_vblank_orig_return;
+    u32 intr_fifo_orig_return;
 	u32 cheatEngineAddr;
 	u32 musicBuffer;
 	const module_params_t* moduleParams;
 	u32 cardStruct;
 	u32 valueBits;
 	/*
+		7: a9IrqHooked
+		8: delayWrites
 		17: sleepMode
 	*/
 	s32 mainScreen;
@@ -147,10 +157,12 @@ typedef struct cardengineArm7Patches {
     u32* card_irq_enable_arm7;
     u32* thumb_card_irq_enable_arm7;
     u32 vblankHandler;
+    u32 fifoHandler;
     u32* j_twlGetPitchTable;
     cardengineArm7PatchesArm7FunctionsThumb* arm7FunctionsDirect;
     cardengineArm7PatchesArm7Functions* arm7Functions;
     cardengineArm7PatchesArm7FunctionsThumb* arm7FunctionsThumb;
+	u32* reset;
 } cardengineArm7Patches;
 
 //
@@ -160,12 +172,14 @@ typedef struct cardengineArm7 {
 	u32 ce7;
 	cardengineArm7Patches* patches;
 	u32 intr_vblank_orig_return;
+    u32 intr_fifo_orig_return;
 	u32 cheatEngineAddr;
 	u32 musicBuffer;
 	const module_params_t* moduleParams;
 	u32 cardStruct;
 	u32 valueBits;
 	/*
+		7: a9IrqHooked
 		17: sleepMode
 	*/
 	s32 mainScreen;

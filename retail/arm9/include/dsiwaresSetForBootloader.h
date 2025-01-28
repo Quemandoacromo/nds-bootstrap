@@ -53,6 +53,8 @@ static const char dsiWareForBootloader1[][4] = {
 	"K2Z", // G.G Series: Altered Weapon
 	"KF2", // Amakuchi! Dairoujou
 	"KAX", // Animal Boxing
+	"KWG", // Animal Crossing Calculator
+	// "KWC", // Animal Crossing Clock
 	"KPC", // Animal Puzzle Adventure
 	"KY8", // Anne's Doll Studio: Antique Collection
 	"K54", // Anne's Doll Studio: Gothic Collection
@@ -147,6 +149,7 @@ static const char dsiWareForBootloader1[][4] = {
 	"KCR", // Crazy Sudoku
 	"KXD", // Crystal Adventure
 	"KQQ", // Crystal Caverns of Amon-Ra
+	"KKT", // Cut the Rope (bootloaderi-exclusive)
 	"K32", // CuteWitch! runner
 	"KTA", // G.G Series: D-Tank
 	"KF3", // Dairojo! Samurai Defenders
@@ -247,6 +250,7 @@ static const char dsiWareForBootloader1[][4] = {
 	"KKI", // Hellokids: Vol. 1: Coloring and Painting!
 	"K5E", // G.G Series: Hero Puzzle
 	"K5J", // G.G Series: The Hidden Ninja Kagemaru
+	"KHJ", // Hidden Photo (bootloaderi-exclusive)
 	"KTX", // High Stakes Texas Hold'em
 	"KHI", // Hints Hunter
 	"KT2", // G.G Series: Horizontal Bar
@@ -267,8 +271,6 @@ static const char dsiWareForBootloader1[][4] = {
 	"KZC", // Jump Trials Extreme
 	"KJF", // Just SING! 80's
 	"K4C", // Just SING! Christmas Songs (bootloaderi-exclusive)
-};
-static const char dsiWareForBootloader2[][4] = {
 	"KPA", // A Kappa's Trail (bootloaderi-exclusive)
 	"K69", // Katamukusho (bootloaderi-exclusive)
 	"K3H", // Kazu De Asobu: Mahoujin To Imeji Kei-san
@@ -300,7 +302,8 @@ static const char dsiWareForBootloader2[][4] = {
 	"KWM", // Magical Whip
 	"KJO", // Magnetic Joe
 	"KYL", // Make Up & Style
-	"KDM", // Mario vs. Donkey Kong: Minis March Again!
+	"KWF", // Mario Calculator
+	"KDM", // Mario vs. Donkey Kong: Minis March Again! (bootloaderi-exclusive)
 	"KM9", // Master of Illusion Express: Deep Psyche
 	"KMF", // Master of Illusion Express: Funny Face
 	"KMD", // Master of Illusion Express: Matchmaker
@@ -308,6 +311,8 @@ static const char dsiWareForBootloader2[][4] = {
 	"KMN", // Master of Illusion Express: Psychic Camera (bootloaderi-exclusive)
 	"KMS", // Master of Illusion Express: Shuffle Games
 	"KUP", // Match Up!
+};
+static const char dsiWareForBootloader3[][4] = {
 	"KWK", // Mega Words
 	"KMK", // Mehr Kreuzwortratsel: Welt Edition
 	"KD4", // Meikyou Kokugo: Rakubiki Jiten
@@ -496,7 +501,7 @@ static const char dsiWareForBootloader2[][4] = {
 	"KOW", // Surfacer+
 	"K97", // Sutanoberuzu: Kono Hareta Sora no Shita de
 	"K98", // Sutanoberuzu: Shirogane no Torikago
-	"KSY", // System Flaw: Recruit (bootloaderi-exclusive)
+	"KSY", // System Flaw: Recruit
 	"KZU", // Tales to Enjoy!: Little Red Riding Hood
 	"KZV", // Tales to Enjoy!: Puss in Boots
 	"KZ7", // Tales to Enjoy!: The Three Little Pigs
