@@ -7,6 +7,7 @@
 #include "cardengine_header_arm9.h"
 #include "unpatched_funcs.h"
 #include "debug_file.h"
+#include "my_fat.h"
 #include "tonccpy.h"
 #include "value_bits.h"
 
@@ -134,8 +135,19 @@ static bool patchCardRead(cardengineArm9* ce9, const tNDSHeader* ndsHeader, cons
 	}
 
 	// Patch
-	u32* cardReadPatch = (usesThumb ? ce9->thumbPatches->card_read_arm9 : ce9->patches->card_read_arm9);
-	tonccpy(cardReadStartOffset, cardReadPatch, usesThumb ? (isSdk5(moduleParams) ? 0xB0 : 0xA0) : 0xE0); // 0xE0 = 0xF0 - 0x08
+	const u32 newCardRead = (u32)ce9->patches->card_read_arm9;
+	// tonccpy(cardReadStartOffset, cardReadPatch, usesThumb ? (isSdk5(moduleParams) ? 0xB0 : 0xA0) : 0xE0); // 0xE0 = 0xF0 - 0x08
+	if (usesThumb) {
+		u16* offsetThumb = (u16*)cardReadStartOffset;
+		offsetThumb[0] = 0xB540; // push {r6, lr}
+		offsetThumb[1] = 0x4E01; // ldr r6, =newCardRead
+		offsetThumb[2] = 0x47B0; // blx r6
+		offsetThumb[3] = 0xBD40; // pop {r6, pc}
+		cardReadStartOffset[2] = newCardRead;
+	} else {
+		cardReadStartOffset[0] = 0xE51FF004; // ldr pc, =newCardRead
+		cardReadStartOffset[1] = newCardRead;
+	}
     dbg_printf("cardRead location : ");
     dbg_hexa((u32)cardReadStartOffset);
     dbg_printf("\n");
@@ -158,6 +170,185 @@ static bool patchCardReadMvDK4(u32 startOffset) {
 	dbg_hexa((u32)offset);
 	dbg_printf("\n\n");
 	return true;
+}
+
+static void patchCardSaveCmd(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
+	const char* romTid = getRomTid(ndsHeader);
+	if (strncmp(romTid, "TAM", 3) != 0 // The Amazing Spider-Man
+	 && strncmp(romTid, "AWD", 3) != 0 // Diddy Kong Racing
+	 && strncmp(romTid, "BO5", 3) != 0 // Golden Sun: Dark Dawn
+	 && strncmp(romTid, "AMM", 3) != 0 // Minna no Mahjong DS
+	 && strncmp(romTid, "B8I", 3) != 0 // Spider-Man: Edge of Time
+	// && strncmp(romTid, "CP3", 3) != 0 // Viva Pinata: Pocket Paradise
+	) return;
+
+	// Card save command
+	u32* offset = patchOffsetCache.cardSaveCmdOffset;
+	if (!patchOffsetCache.cardSaveCmdOffset) {
+		if (isSdk5(moduleParams)) {
+			offset = findCardSaveCmdOffset5(ndsHeader);
+		} else if (moduleParams->sdk_version > 0x2020000) {
+			offset = findCardSaveCmdOffset3(ndsHeader);
+		} else {
+			offset = findCardSaveCmdOffset2(ndsHeader);
+		}
+		if (offset) {
+			patchOffsetCache.cardSaveCmdOffset = offset;
+		}
+	}
+
+	if (!offset) {
+		return;
+	}
+	// Patch
+	if (isSdk5(moduleParams)) {
+		// SDK 5
+		if (*offset == 0xE92D4070) {
+			if (strncmp(romTid, "BO5", 3) != 0) {
+				tonccpy(offset, ce9->patches->card_save_arm9, 8);
+			} else if (offset[1] == 0xE1A05001) {
+				// offset[6] = 0xE1A00000; // nop
+				// setBL((u32)offset+19*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+				ce9->cardStruct1 = offset[21]+0x4FC;
+				offset[22] = (u32)ce9->patches->card_save_arm9;
+			} else {
+				// offset[10] = 0xE1A00000; // nop
+				// setBL((u32)offset+23*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+				ce9->cardStruct1 = offset[25]+0x4FC;
+				offset[26] = (u32)ce9->patches->card_save_arm9;
+			}
+		} else {
+			tonccpy(offset, ce9->thumbPatches->card_save_arm9, 0xC);
+			/* // u16* offsetThumb = (u16*)offset;
+			// offsetThumb[12] = 0x46C0; // nop
+			// offsetThumb[13] = 0x46C0; // nop
+			// setBLThumb((u32)offset+27*2, (u32)patchOffsetCache.cardReadStartOffset+0xC);
+			ce9->cardStruct1 = offset[15]+0x7C;
+			offset[17] = (u32)ce9->patches->card_save_arm9; */
+		}
+		// ce9->cardSaveCmdPos = 7;
+	} else if (moduleParams->sdk_version > 0x2020000) {
+		// SDK 2.2 - 4
+		// const u8 add = (moduleParams->sdk_version > 0x3000000) ? 0x1C : 0x18;
+		// u16* offsetThumb = (u16*)offset;
+		if (*offset == 0xE92D47F0 || *offset == 0xE92D43F8) {
+			tonccpy(offset, ce9->patches->card_save_arm9, 8);
+			/* setB((u32)offset+8*4, (u32)offset+27*4);
+			offset[37] = 0xE1A00000; // nop
+			offset[38] = 0xE1A00000; // nop
+			setBL((u32)offset+40*4, (u32)patchOffsetCache.cardReadStartOffset+8); */
+			// offset[41] = 0xE1A00000; // nop
+			// ce9->cardStruct1 = offset[57]+add;
+			// offset[59] = (u32)ce9->patches->card_save_arm9;
+		} /* else if (*offset == 0xE92D43F8) {
+			setB((u32)offset+8*4, (u32)offset+26*4);
+			offset[36] = 0xE1A00000; // nop
+			offset[37] = 0xE1A00000; // nop
+			setBL((u32)offset+39*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+			// offset[40] = 0xE1A00000; // nop
+			// ce9->cardStruct1 = offset[54]+add;
+			// offset[56] = (u32)ce9->patches->card_save_arm9;
+		} else if (offsetThumb[2] == 0x1C06) {
+			// for (int i = 10; i <= 43; i++) {
+			//	offsetThumb[i] = 0x46C0; // nop
+			// }
+			offsetThumb[55] = 0x46C0; // nop
+			offsetThumb[56] = 0x46C0; // nop
+			setBLThumb((u32)offset+58*2, (u32)patchOffsetCache.cardReadStartOffset+0xC);
+			// offsetThumb[60] = 0x46C0; // nop
+			ce9->cardStruct1 = offset[44]+add;
+			// offset[46] = (u32)ce9->patches->card_save_arm9;
+		} */ else {
+			tonccpy(offset, ce9->thumbPatches->card_save_arm9, 0xC);
+			// for (int i = 10; i <= 39; i++) {
+			//	offsetThumb[i] = 0x46C0; // nop
+			// }
+			/* offsetThumb[53] = 0x46C0; // nop
+			offsetThumb[54] = 0x46C0; // nop
+			setBLThumb((u32)offset+56*2, (u32)patchOffsetCache.cardReadStartOffset+0xC);
+			if (offsetThumb[58] == 0x2001) {
+				// offsetThumb[58] = 0x46C0; // nop
+				ce9->cardStruct1 = offset[42]+add;
+				// offset[43] = (u32)ce9->patches->card_save_arm9;
+			} else {
+				// offsetThumb[59] = 0x46C0; // nop
+				ce9->cardStruct1 = offset[41]+add;
+				// offset[42] = (u32)ce9->patches->card_save_arm9;
+			} */
+		}
+		// ce9->cardSaveCmdPos = (moduleParams->sdk_version > 0x3000000) ? 6 : 5;
+	} else {
+		// SDK 2
+		if (*offset == 0xE92D47F0) {
+			tonccpy(offset, ce9->patches->card_save_arm9, 8); // Write
+			if (offset[1] == 0xE59F60BC) {
+				/* setB((u32)offset+6*4, (u32)offset+23*4);
+				offset[30] = 0xE1A00000; // nop
+				offset[31] = 0xE1A00000; // nop
+				setBL((u32)offset+33*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+				offset[34] = 0xE1A00000; // nop */
+
+				u32* offset2 = (offset + 0xD4/4);
+				if (*offset2 == 0xE92D47F0) {
+					tonccpy(offset2, ce9->patches->card_save_arm9, 8); // Read
+					/* setB((u32)offset2+6*4, (u32)offset2+23*4);
+					offset2[30] = 0xE1A00000; // nop
+					offset2[31] = 0xE1A00000; // nop
+					setBL((u32)offset2+33*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+					offset2[34] = 0xE1A00000; // nop */
+				}
+			} else {
+				/* setB((u32)offset+6*4, (u32)offset+22*4);
+				offset[29] = 0xE1A00000; // nop
+				offset[30] = 0xE1A00000; // nop
+				setBL((u32)offset+32*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+				offset[33] = 0xE1A00000; // nop */
+
+				u32* offset2 = (offset + 0xD0/4);
+				if (*offset2 == 0xE92D47F0) {
+					tonccpy(offset2, ce9->patches->card_save_arm9, 8); // Read
+					/* setB((u32)offset2+6*4, (u32)offset2+22*4);
+					offset2[29] = 0xE1A00000; // nop
+					offset2[30] = 0xE1A00000; // nop
+					setBL((u32)offset2+32*4, (u32)patchOffsetCache.cardReadStartOffset+8);
+					offset2[33] = 0xE1A00000; // nop */
+				}
+			}
+		} else if (*offset == 0xE92D000F) {
+			setBL((u32)offset+49*4, (u32)ce9->patches->card_save_arm9); // Write
+			u32* offset2 = (offset + 0xF4/4);
+			if (*offset2 == 0xE92D000F) {
+				setBL((u32)offset2+49*4, (u32)ce9->patches->card_save_arm9); // Read
+			}
+		} else {
+			tonccpy(offset, ce9->thumbPatches->card_save_arm9, 0xC); // Write
+			/* u16* offsetThumb = (u16*)offset;
+			for (int i = 7; i <= 29; i++) {
+				offsetThumb[i] = 0x46C0; // nop
+			}
+			offsetThumb[39] = 0x46C0; // nop
+			offsetThumb[40] = 0x46C0; // nop
+			setBLThumb((u32)offset+42*2, (u32)patchOffsetCache.cardReadStartOffset+0xC);
+			offsetThumb[44] = 0x46C0; // nop */
+
+			u32* offset2 = (offset + 0x9C/4);
+			u16* offsetThumb2 = (u16*)offset2;
+			if (*offsetThumb2 == 0xB5F0) {
+				tonccpy(offset, ce9->thumbPatches->card_save_arm9, 0xC); // Read
+				/* for (int i = 7; i <= 29; i++) {
+					offsetThumb2[i] = 0x46C0; // nop
+				}
+				offsetThumb2[39] = 0x46C0; // nop
+				offsetThumb2[40] = 0x46C0; // nop
+				setBLThumb((u32)offset2+42*2, (u32)patchOffsetCache.cardReadStartOffset+0xC);
+				offsetThumb2[44] = 0x46C0; // nop */
+			}
+		}
+	}
+
+	dbg_printf("cardSaveCmd location : ");
+	dbg_hexa((u32)offset);
+	dbg_printf("\n\n");
 }
 
 static void patchCardPullOut(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams, bool usesThumb, int sdk5ReadType, u32** cardPullOutOffsetPtr) {
@@ -189,8 +380,7 @@ static void patchCardPullOut(cardengineArm9* ce9, const tNDSHeader* ndsHeader, c
 	}
 
 	// Patch
-	u32* cardPullOutPatch = (usesThumb ? ce9->thumbPatches->card_pull : ce9->patches->card_pull);
-	tonccpy(cardPullOutOffset, cardPullOutPatch, 0x4);
+	*cardPullOutOffset = usesThumb ? 0x47704770 : 0xE12FFF1E; // bx lr
     dbg_printf("cardPullOut location : ");
     dbg_hexa((u32)cardPullOutOffset);
     dbg_printf("\n\n");
@@ -243,10 +433,14 @@ static bool patchCardId(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const 
 	if (cardIdStartOffset) {
         // Patch
 		extern u32 baseChipID;
-		u32* cardIdPatch = (usesThumb ? ce9->thumbPatches->card_id_arm9 : ce9->patches->card_id_arm9);
-
-		cardIdPatch[usesThumb ? 1 : 2] = baseChipID;
-		tonccpy(cardIdStartOffset, cardIdPatch, usesThumb ? 0x8 : 0xC);
+		if (usesThumb) {
+			cardIdStartOffset[0] = 0x47704800; // ldr r0, baseChipID + bx lr
+			cardIdStartOffset[1] = baseChipID;
+		} else {
+			cardIdStartOffset[0] = 0xE59F0000; // ldr r0, baseChipID
+			cardIdStartOffset[1] = 0xE12FFF1E; // bx lr
+			cardIdStartOffset[2] = baseChipID;
+		}
 		dbg_printf("cardId location : ");
 		dbg_hexa((u32)cardIdStartOffset);
 		dbg_printf("\n\n");
@@ -274,43 +468,238 @@ static void patchCardReadDma(cardengineArm9* ce9, const tNDSHeader* ndsHeader, c
 		if (cardReadDmaStartOffset) {
 			patchOffsetCache.cardReadDmaOffset = cardReadDmaStartOffset;
 		}
+		if (cardReadDmaEndOffset) {
+			patchOffsetCache.cardReadDmaEndOffset = cardReadDmaEndOffset;
+		}
 		patchOffsetCache.cardReadDmaChecked = true;
 	}
 	if (!cardReadDmaStartOffset) {
 		return;
 	}
 	// Patch
-	u32* cardReadDmaPatch = (usesThumb ? ce9->thumbPatches->card_dma_arm9 : ce9->patches->card_dma_arm9);
-	tonccpy(cardReadDmaStartOffset, cardReadDmaPatch, usesThumb ? 4 : 8);
+	const u32 newCardReadDma = (u32)ce9->patches->card_dma_arm9;
+	if (strncmp(getRomTid(ndsHeader), "BO5", 3) == 0) {
+		cardReadDmaStartOffset[0] = 0xE3A00000; // mov r0, #0
+		cardReadDmaStartOffset[1] = 0xE12FFF1E; // bx lr
+	} else if (usesThumb) {
+		u16* offsetThumb = (u16*)cardReadDmaStartOffset;
+		offsetThumb[0] = 0xB540; // push {r6, lr}
+		offsetThumb[1] = 0x4E01; // ldr r6, =newCardReadDma
+		offsetThumb[2] = 0x47B0; // blx r6
+		offsetThumb[3] = 0xBD40; // pop {r6, pc}
+		cardReadDmaStartOffset[2] = newCardReadDma;
+	} else {
+		cardReadDmaStartOffset[0] = 0xE51FF004; // ldr pc, =newCardReadDma
+		cardReadDmaStartOffset[1] = newCardReadDma;
+	}
     dbg_printf("cardReadDma location : ");
     dbg_hexa((u32)cardReadDmaStartOffset);
     dbg_printf("\n\n");
 }
 
-static void patchReset(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {    
-    u32* reset = patchOffsetCache.resetOffset;
+static bool patchCardEndReadDma(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams, bool usesThumb) {
+	const char* romTid = getRomTid(ndsHeader);
+
+	if (strncmp(romTid, "AWD", 3) == 0 // Diddy Kong Racing
+	 || strncmp(romTid, "CP3", 3) == 0	// Viva Pinata
+	 || strncmp(romTid, "BO5", 3) == 0 // Golden Sun: Dark Dawn
+	 || strncmp(romTid, "Y8L", 3) == 0 // Golden Sun: Dark Dawn (Demo Version)
+	 || strncmp(romTid, "B8I", 3) == 0 // Spider-Man: Edge of Time
+	 || strncmp(romTid, "TAM", 3) == 0 // The Amazing Spider-Man
+	 || (strncmp(romTid, "V2G", 3) == 0 /* && !dsiModeConfirmed */) // Mario vs. Donkey Kong: Mini-Land Mayhem (DS mode)
+	 || !cardReadDMA) return false;
+
+    u32* offset = patchOffsetCache.cardEndReadDmaOffset;
+    u32 offsetDmaHandler = patchOffsetCache.dmaHandlerOffset;
+	  if (!patchOffsetCache.cardEndReadDmaChecked) {
+		if (!patchOffsetCache.cardReadDmaEndOffset) {
+			u32* cardReadDmaEndOffset = findCardReadDmaEndOffset(ndsHeader, moduleParams);
+			if (!cardReadDmaEndOffset && usesThumb) {
+				cardReadDmaEndOffset = (u32*)findCardReadDmaEndOffsetThumb(ndsHeader);
+			}
+			if (cardReadDmaEndOffset) {
+				patchOffsetCache.cardReadDmaEndOffset = cardReadDmaEndOffset;
+			}
+		}
+		offset = findCardEndReadDma(ndsHeader,moduleParams,usesThumb,patchOffsetCache.cardReadDmaEndOffset,&offsetDmaHandler);
+		if (offset) {
+			patchOffsetCache.cardEndReadDmaOffset = offset;
+			patchOffsetCache.dmaHandlerOffset = offsetDmaHandler;
+		}
+		patchOffsetCache.cardEndReadDmaChecked = true;
+	  }
+    if(offset) {
+      dbg_printf("\nDMA CARD READ METHOD ACTIVE\n");
+    dbg_printf("cardEndReadDma location : ");
+    dbg_hexa((u32)offset);
+    dbg_printf("\n\n");
+      if(!isSdk5(moduleParams)) {
+        // SDK1-4
+        if(usesThumb) {
+            u16* thumbOffset = (u16*)offset;
+            u16* thumbOffsetStartFunc = (u16*)offset;
+			bool lrOnly = false;
+            for (int i = 0; i <= 18; i++) {
+                thumbOffsetStartFunc--;
+				if (*thumbOffsetStartFunc==0xB5F0) {
+					//dbg_printf("\nthumbOffsetStartFunc : ");
+					//dbg_hexa(*thumbOffsetStartFunc);
+					lrOnly = true;
+					break;
+				}
+            }
+            thumbOffset--;
+			if (lrOnly) {
+				thumbOffset--;
+				thumbOffset[0] = *thumbOffsetStartFunc; // push	{r4-r7, lr}
+				thumbOffset[1] = 0xB081; // SUB SP, SP, #4
+			} else {
+				*thumbOffset = 0xB5F8; // push	{r3-r7, lr}
+			}
+            ce9->thumbPatches->cardEndReadDmaRef = (u32*)thumbOffset;
+        } else {
+            u32* armOffset = (u32*)offset;
+            u32* armOffsetStartFunc = (u32*)offset;
+			bool lrOnly = false;
+            for (int i = 0; i <= 16; i++) {
+                armOffsetStartFunc--;
+				if (*armOffsetStartFunc==0xE92D4000 || *armOffsetStartFunc==0xE92D4030 || *armOffsetStartFunc==0xE92D40F0) {
+					//dbg_printf("\narmOffsetStartFunc : ");
+					//dbg_hexa(*armOffsetStartFunc);
+					lrOnly = true;
+					break;
+				}
+            }
+            armOffset--;
+			if (lrOnly) {
+				armOffset--;
+				armOffset[0] = *armOffsetStartFunc; // "STMFD SP!, {LR}", "STMFD SP!, {R4,R5,LR}", or "STMFD SP!, {R4-R7,LR}"
+				armOffset[1] = 0xE24DD004; // SUB SP, SP, #4
+				if (offsetDmaHandler && *armOffsetStartFunc==0xE92D40F0) {
+					offsetDmaHandler += 14*sizeof(u32); // Relocation fix
+				}
+			} else {
+				*armOffset = 0xE92D40F8; // STMFD SP!, {R3-R7,LR}
+			}
+            ce9->patches->cardEndReadDmaRef = offsetDmaHandler==0 ? armOffset : (u32*)offsetDmaHandler;
+        }
+      } else {
+        // SDK5
+        if(usesThumb) {
+            u16* thumbOffset = (u16*)offset;
+            while(*thumbOffset!=0xB508) { // push	{r3, lr}
+                thumbOffset--;
+            }
+            ce9->thumbPatches->cardEndReadDmaRef = (u32*)thumbOffset;
+            thumbOffset[1] = 0x46C0; // NOP
+            thumbOffset[2] = 0x46C0; // NOP
+            thumbOffset[3] = 0x46C0; // NOP
+            thumbOffset[4] = 0x46C0; // NOP
+        } else  {
+            u32* armOffset = (u32*)offset;
+            armOffset--;
+			*armOffset = 0xE92D4008; // STMFD SP!, {R3,LR}
+            ce9->patches->cardEndReadDmaRef = armOffset;
+        }
+	  }
+	  return true;
+    }
+	return false;
+}
+
+static bool patchCardSetDma(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams, bool usesThumb) {
+	const char* romTid = getRomTid(ndsHeader);
+
+	if (strncmp(romTid, "AWD", 3) == 0 // Diddy Kong Racing
+	 || strncmp(romTid, "CP3", 3) == 0	// Viva Pinata
+	 || strncmp(romTid, "BO5", 3) == 0 // Golden Sun: Dark Dawn
+	 || strncmp(romTid, "Y8L", 3) == 0 // Golden Sun: Dark Dawn (Demo Version)
+	 || strncmp(romTid, "B8I", 3) == 0 // Spider-Man: Edge of Time
+	 || strncmp(romTid, "TAM", 3) == 0 // The Amazing Spider-Man
+	 || (strncmp(romTid, "V2G", 3) == 0 /* && !dsiModeConfirmed */) // Mario vs. Donkey Kong: Mini-Land Mayhem (DS mode)
+	 || !cardReadDMA) return false;
+
+	dbg_printf("\npatchCardSetDma\n");
+
+    u32* setDmaoffset = patchOffsetCache.cardSetDmaOffset;
+    if (!patchOffsetCache.cardSetDmaChecked) {
+		setDmaoffset = findCardSetDma(ndsHeader,moduleParams,usesThumb);
+		if (setDmaoffset) {
+			patchOffsetCache.cardSetDmaOffset = setDmaoffset;
+		}
+		patchOffsetCache.cardSetDmaChecked = true;
+    }
+    if(setDmaoffset) {
+      dbg_printf("\nDMA CARD SET METHOD ACTIVE\n");
+    dbg_printf("cardSetDma location : ");
+    dbg_hexa((u32)setDmaoffset);
+    dbg_printf("\n\n");
+      const u32 newCardSetDma = (u32)ce9->patches->card_set_dma_arm9;
+		if (usesThumb) {
+			u16* offsetThumb = (u16*)setDmaoffset;
+			offsetThumb[0] = 0xB540; // push {r6, lr}
+			offsetThumb[1] = 0x4E01; // ldr r6, =newCardSetDma
+			offsetThumb[2] = 0x47B0; // blx r6
+			offsetThumb[3] = 0xBD40; // pop {r6, pc}
+			setDmaoffset[2] = newCardSetDma;
+		} else {
+			setDmaoffset[0] = 0xE51FF004; // ldr pc, =newCardSetDma
+			setDmaoffset[1] = newCardSetDma;
+		}
+
+      return true;
+    }
+
+    return false;
+}
+
+static void patchReset(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
+	const u32 newReset = (u32)ce9->patches->reset_arm9;
+	const char* romTid = getRomTid(ndsHeader);
+	if (ndsHeader->unitCode == 0 && (strcmp(romTid, "NTRJ") == 0 || strncmp(romTid, "HND", 3) == 0 || strncmp(romTid, "HNE", 3) == 0)) {
+		u32* offset = patchOffsetCache.srlStartOffset9;
+
+		if (!patchOffsetCache.srlStartOffsetChecked) {
+			offset = findSrlStartOffset9(ndsHeader);
+			if (offset) patchOffsetCache.srlStartOffset9 = offset;
+			patchOffsetCache.srlStartOffsetChecked = true;
+		}
+
+		if (offset) {
+			// Patch
+			offset[0] = 0xE59F1000; // ldr r1, =newReset
+			offset[1] = 0xE59FF000; // ldr pc, =reset_arm9
+			offset[2] = 0x4C525344; // 'DSRL'
+			offset[3] = newReset;
+			dbg_printf("srlStart location : ");
+			dbg_hexa((u32)offset);
+			dbg_printf("\n\n");
+		}
+	}
+
+	u32* offset = patchOffsetCache.resetOffset;
 
     if (!patchOffsetCache.resetChecked) {
-		reset = findResetOffset(ndsHeader,moduleParams, (bool*)&patchOffsetCache.resetMb);
-		if (reset) patchOffsetCache.resetOffset = reset;
+		offset = findResetOffset(ndsHeader, moduleParams, (bool)patchOffsetCache.srlStartOffset9);
+		if (offset) patchOffsetCache.resetOffset = offset;
 		patchOffsetCache.resetChecked = true;
 	}
 
-	if (!reset) {
+	if (!offset) {
 		return;
 	}
 
 	// Patch
-	u32* resetPatch = ce9->patches->reset_arm9;
-	tonccpy(reset, resetPatch, 0x40);
+	offset[0] = 0xE51FF004; // ldr pc, =newReset
+	offset[1] = newReset;
 	dbg_printf("reset location : ");
-	dbg_hexa((u32)reset);
+	dbg_hexa((u32)offset);
 	dbg_printf("\n\n");
 }
 
 static void patchResetTwl(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
 	extern u32 accessControl;
-	if (!(accessControl & BIT(4))) {
+	if (!(accessControl & BIT(4)) && strncmp(ndsHeader->gameCode, "DMF", 3) != 0) {
 		return;
 	}
 
@@ -325,49 +714,54 @@ static void patchResetTwl(cardengineArm9* ce9, const tNDSHeader* ndsHeader, cons
 	if (!nandTmpJumpFuncOffset) {
 		return;
 	}
-	extern u32 generateA7Instr(int arg1, int arg2);
 
 	// Patch
+	const u32 newReset = (u32)ce9->patches->reset_arm9;
 	if (moduleParams->sdk_version < 0x5008000) {
 		nandTmpJumpFuncOffset[0] = 0xE59F0000; // ldr r0, =0xFFFFFFFF
-		nandTmpJumpFuncOffset[1] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) + (1 * sizeof(u32))), (int)ce9->patches->reset_arm9);
+		nandTmpJumpFuncOffset[1] = 0xE59FF000; // ldr pc, =newReset
 		nandTmpJumpFuncOffset[2] = 0xFFFFFFFF;
+		nandTmpJumpFuncOffset[3] = newReset;
 	} else if (nandTmpJumpFuncOffset[-3] == 0xE8BD8008 && nandTmpJumpFuncOffset[-1] == 0x02FFE230) { // DEBUG
-		nandTmpJumpFuncOffset[-15] = 0xE59F0000; // ldr r0, =0
-		nandTmpJumpFuncOffset[-14] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (14 * sizeof(u32))), (int)ce9->patches->reset_arm9);
-		nandTmpJumpFuncOffset[-13] = 0;
+		nandTmpJumpFuncOffset[-15] = 0xE3A00000; // mov r0, #0
+		nandTmpJumpFuncOffset[-14] = 0xE51FF004; // ldr pc, =newReset
+		nandTmpJumpFuncOffset[-13] = newReset;
 		dbg_printf("Reset (TWL) patched!\n");
 	} else if (nandTmpJumpFuncOffset[-2] == 0xE8BD8008 && nandTmpJumpFuncOffset[-1] == 0x02FFE230) {
-		nandTmpJumpFuncOffset[-11] = 0xE59F0000; // ldr r0, =0
-		nandTmpJumpFuncOffset[-10] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (10 * sizeof(u32))), (int)ce9->patches->reset_arm9);
-		nandTmpJumpFuncOffset[-9] = 0;
+		nandTmpJumpFuncOffset[-11] = 0xE3A00000; // mov r0, #0
+		nandTmpJumpFuncOffset[-10] = 0xE51FF004; // ldr pc, =newReset
+		nandTmpJumpFuncOffset[-9] = newReset;
 		dbg_printf("Reset (TWL) patched!\n");
 		if (nandTmpJumpFuncOffset[-13] == 0xE12FFF1C) {
 			nandTmpJumpFuncOffset[-17] = 0xE59F0000; // ldr r0, =0xFFFFFFFF
-			nandTmpJumpFuncOffset[-16] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (16 * sizeof(u32))), (int)ce9->patches->reset_arm9);
+			nandTmpJumpFuncOffset[-16] = 0xE59FF000; // ldr pc, =newReset
 			nandTmpJumpFuncOffset[-15] = 0xFFFFFFFF;
+			nandTmpJumpFuncOffset[-14] = newReset;
 			dbg_printf("Exit-to-menu patched!\n");
 		}
 	} else if (nandTmpJumpFuncOffset[-2] == 0xE12FFF1C) {
 		nandTmpJumpFuncOffset[-6] = 0xE59F0000; // ldr r0, =0xFFFFFFFF
-		nandTmpJumpFuncOffset[-5] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (5 * sizeof(u32))), (int)ce9->patches->reset_arm9);
+		nandTmpJumpFuncOffset[-5] = 0xE59FF000; // ldr pc, =newReset
 		nandTmpJumpFuncOffset[-4] = 0xFFFFFFFF;
+		nandTmpJumpFuncOffset[-3] = newReset;
 		dbg_printf("Exit-to-menu patched!\n");
 	} else if (nandTmpJumpFuncOffset[-15] == 0xE8BD8008 && nandTmpJumpFuncOffset[-14] == 0x02FFE230) {
-		nandTmpJumpFuncOffset[-24] = 0xE59F0000; // ldr r0, =0
-		nandTmpJumpFuncOffset[-23] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (23 * sizeof(u32))), (int)ce9->patches->reset_arm9);
-		nandTmpJumpFuncOffset[-22] = 0;
+		nandTmpJumpFuncOffset[-24] = 0xE3A00000; // mov r0, #0
+		nandTmpJumpFuncOffset[-23] = 0xE51FF004; // ldr pc, =newReset
+		nandTmpJumpFuncOffset[-22] = newReset;
 		dbg_printf("Reset (TWL) patched!\n");
 		if (nandTmpJumpFuncOffset[-26] == 0xE12FFF1C) {
 			nandTmpJumpFuncOffset[-20] = 0xE59F0000; // ldr r0, =0xFFFFFFFF
-			nandTmpJumpFuncOffset[-19] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (19 * sizeof(u32))), (int)ce9->patches->reset_arm9);
+			nandTmpJumpFuncOffset[-19] = 0xE59FF000; // ldr pc, =newReset
 			nandTmpJumpFuncOffset[-18] = 0xFFFFFFFF;
+			nandTmpJumpFuncOffset[-17] = newReset;
 			dbg_printf("Exit-to-menu patched!\n");
 		}
 	} else if (nandTmpJumpFuncOffset[-15] == 0xE12FFF1C) {
 		nandTmpJumpFuncOffset[-19] = 0xE59F0000; // ldr r0, =0xFFFFFFFF
-		nandTmpJumpFuncOffset[-18] = generateA7Instr((int)(((u32)nandTmpJumpFuncOffset) - (5 * sizeof(u32))), (int)ce9->patches->reset_arm9);
+		nandTmpJumpFuncOffset[-18] = 0xE59FF000; // ldr pc, =newReset
 		nandTmpJumpFuncOffset[-17] = 0xFFFFFFFF;
+		nandTmpJumpFuncOffset[-16] = newReset;
 		dbg_printf("Exit-to-menu patched!\n");
 	}
 	dbg_printf("nandTmpJumpFunc location : ");
@@ -375,7 +769,21 @@ static void patchResetTwl(cardengineArm9* ce9, const tNDSHeader* ndsHeader, cons
 	dbg_printf("\n\n");
 }
 
+bool patchedCardIrqEnable = false;
+
 static bool patchCardIrqEnable(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams) {
+	const char* romTid = getRomTid(ndsHeader);
+
+	if (strncmp(romTid, "AWD", 3) == 0 // Diddy Kong Racing - Fix corrupted 3D model bug
+	 || strncmp(romTid, "CP3", 3) == 0 // Viva Pinata - Fix touch and model rendering bug
+	 || strncmp(romTid, "BO5", 3) == 0 // Golden Sun: Dark Dawn - Fix black screen on boot
+	 || strncmp(romTid, "Y8L", 3) == 0 // Golden Sun: Dark Dawn (Demo Version) - Fix black screen on boot
+	 || strncmp(romTid, "B8I", 3) == 0 // Spider-Man: Edge of Time - Fix white screen on boot
+	 || strncmp(romTid, "TAM", 3) == 0 // The Amazing Spider-Man - Fix white screen on boot
+	) {
+		return true;
+	}
+
 	bool usesThumb = patchOffsetCache.a9CardIrqIsThumb;
 
 	// Card irq enable
@@ -390,11 +798,22 @@ static bool patchCardIrqEnable(cardengineArm9* ce9, const tNDSHeader* ndsHeader,
 	if (!cardIrqEnableOffset) {
 		return false;
 	}
-	u32* cardIrqEnablePatch = (usesThumb ? ce9->thumbPatches->card_irq_enable : ce9->patches->card_irq_enable);
-	tonccpy(cardIrqEnableOffset, cardIrqEnablePatch, usesThumb ? 0x18 : 0x30);
+	const u32 newCardIrqEnable = (u32)ce9->patches->card_irq_enable;
+	if (usesThumb) {
+		u16* offsetThumb = (u16*)cardIrqEnableOffset;
+		offsetThumb[0] = 0xB540; // push {r6, lr}
+		offsetThumb[1] = 0x4E01; // ldr r6, =newCardIrqEnable
+		offsetThumb[2] = 0x47B0; // blx r6
+		offsetThumb[3] = 0xBD40; // pop {r6, pc}
+		cardIrqEnableOffset[2] = newCardIrqEnable;
+	} else {
+		cardIrqEnableOffset[0] = 0xE51FF004; // ldr pc, =newCardIrqEnable
+		cardIrqEnableOffset[1] = newCardIrqEnable;
+	}
     dbg_printf("cardIrqEnable location : ");
     dbg_hexa((u32)cardIrqEnableOffset);
     dbg_printf("\n\n");
+	patchedCardIrqEnable = true;
 	return true;
 }
 
@@ -529,7 +948,7 @@ static void patchMpu(const tNDSHeader* ndsHeader, const module_params_t* moduleP
 }
 
 static void patchMpu2(const tNDSHeader* ndsHeader, const module_params_t* moduleParams, const bool usesCloneboot) {
-	if (((moduleParams->sdk_version < 0x2008000) && !extendedMemory) || moduleParams->sdk_version > 0x5000000) {
+	if (((moduleParams->sdk_version < 0x2008000) && !extendedMemory) || ndsHeader->unitCode > 0) {
 		return;
 	}
 
@@ -550,24 +969,26 @@ static void patchMpu2(const tNDSHeader* ndsHeader, const module_params_t* module
 		mpuDataOffset = findMpuDataOffset(moduleParams, 2, mpuStartOffset);
 	}
 	if (mpuDataOffset) {
-		// Change the region 2 configuration (Makes loading slow, so new code is used)
+		if (moduleParams->sdk_version < 0x5000000) {
+			// Change the region 2 configuration
 
-		/*u32 mpuInitRegionNewData = PAGE_32M | 0x02000000 | 1;
-		u32 mpuNewDataAccess = 0x15111111;
-		u32 mpuNewInstrAccess = 0x5111111;
-		int mpuAccessOffset = 6;
+			/*u32 mpuInitRegionNewData = PAGE_32M | 0x02000000 | 1;
+			u32 mpuNewDataAccess = 0x15111111;
+			u32 mpuNewInstrAccess = 0x5111111;
+			int mpuAccessOffset = 6;
 
-		*mpuDataOffset = mpuInitRegionNewData;
+			*mpuDataOffset = mpuInitRegionNewData;
 
-		if (mpuNewInstrAccess) {
-			mpuDataOffset[mpuAccessOffset] = mpuNewInstrAccess;
+			if (mpuNewInstrAccess) {
+				mpuDataOffset[mpuAccessOffset] = mpuNewInstrAccess;
+			}
+			if (mpuNewDataAccess) {
+				mpuDataOffset[mpuAccessOffset + 1] = mpuNewDataAccess;
+			}*/
+			unpatchedFuncs->mpuDataOffset2 = mpuDataOffset;
+			unpatchedFuncs->mpuInitRegionOldData2 = *mpuDataOffset;
+			*mpuDataOffset = 0;
 		}
-		if (mpuNewDataAccess) {
-			mpuDataOffset[mpuAccessOffset + 1] = mpuNewDataAccess;
-		}*/
-		unpatchedFuncs->mpuDataOffset2 = mpuDataOffset;
-		unpatchedFuncs->mpuInitRegionOldData2 = *mpuDataOffset;
-		*mpuDataOffset = 0;
 
 		dbg_printf("Mpu data 2: ");
 		dbg_hexa((u32)mpuDataOffset);
@@ -723,7 +1144,7 @@ void patchMpuChange(const tNDSHeader* ndsHeader, const module_params_t* modulePa
     if(!heapPointer || *heapPointer<0x02000000 || *heapPointer>0x03000000) {
         dbg_printf("ERROR: Wrong lo heap pointer\n");
         dbg_printf("heap pointer value: ");
-	    dbg_hexa(*heapPointer);    
+	    dbg_hexa(*heapPointer);
 		dbg_printf("\n\n");
         return 0;
     } else if (!patchOffsetCache.heapPointerOffset) {
@@ -735,7 +1156,7 @@ void patchMpuChange(const tNDSHeader* ndsHeader, const module_params_t* modulePa
     dbg_printf("old lo heap pointer: ");
 	dbg_hexa((u32)oldheapPointer);
     dbg_printf("\n\n");
-    
+
 	u32 shrinkSize = 0;
 	switch (ndsHeader->deviceSize) {
 		case 0x09:
@@ -758,6 +1179,7 @@ void patchMpuChange(const tNDSHeader* ndsHeader, const module_params_t* modulePa
 }*/
 
 void patchHiHeapPointer(cardengineArm9* ce9, const module_params_t* moduleParams, const tNDSHeader* ndsHeader) {
+	extern u8 _io_dldi_size;
 	extern bool ce9Alt;
 	extern bool ce9AltLargeTable;
 	extern u32 arm7mbk;
@@ -770,12 +1192,13 @@ void patchHiHeapPointer(cardengineArm9* ce9, const module_params_t* moduleParams
 	const u32 cheatSizeTotal = cheatSize+(apPatchIsCheat ? apPatchSize : 0);
 
 	const bool nandAccess = (accessControl & BIT(4)); // isDSiWare
+	const bool laterSdk = ((moduleParams->sdk_version >= 0x2008000 && moduleParams->sdk_version != 0x2012774) || moduleParams->sdk_version == 0x20029A8);
 	const bool ce9NotInHeap = (ce9Alt || (u32)ce9 == CARDENGINE_ARM9_LOCATION_DLDI_START);
 
 	if ((!nandAccess && extendedMemory)
-	|| (moduleParams->sdk_version < 0x2008000 && moduleParams->sdk_version != 0x20029A8)
-	|| (ce9NotInHeap && !ce9AltLargeTable && cheatSizeTotal <= 4)
-	|| (((strncmp(romTid, "YEE", 3) == 0 && romTid[3] != 'J') || strncmp(romTid, "BEB", 3) == 0 || strncmp(romTid, "BEE", 3) == 0) && !ce9AltLargeTable) // Inazuma Eleven 1 & 2
+	|| !laterSdk
+	|| (ce9NotInHeap && !ce9AltLargeTable && cheatSizeTotal <= 4 && _io_dldi_size < 0x0E)
+	|| (((strncmp(romTid, "YEE", 3) == 0 && romTid[3] != 'J') || strncmp(romTid, "BEB", 3) == 0 || strncmp(romTid, "BEE", 3) == 0) && !ce9AltLargeTable && _io_dldi_size < 0x0E) // Inazuma Eleven 1 & 2
 	|| strncmp(romTid, "CLJ", 3) == 0 // Mario & Luigi: Bowser's Inside Story
 	|| strncmp(romTid, "VSO", 3) == 0 // Sonic Classic Collection
 	|| arm7mbk == 0x080037C0) {
@@ -789,7 +1212,7 @@ void patchHiHeapPointer(cardengineArm9* ce9, const module_params_t* moduleParams
 	if(!heapPointer || *heapPointer<0x02000000 || *heapPointer>0x03000000) {
         dbg_printf("ERROR: Wrong heap pointer\n");
         dbg_printf("heap pointer value: ");
-	    dbg_hexa(*heapPointer);    
+	    dbg_hexa(*heapPointer);
 		dbg_printf("\n\n");
         return;
     } else if (!patchOffsetCache.heapPointer2Offset) {
@@ -807,9 +1230,16 @@ void patchHiHeapPointer(cardengineArm9* ce9, const module_params_t* moduleParams
     dbg_printf("\n\n");
 
 	if (nandAccess && extendedMemory) {
-		*heapPointer = CARDENGINE_ARM9_LOCATION_DLDI_EXTMEM;
+		*heapPointer = 0x027D8000;
 	} else if (ce9NotInHeap && !ce9AltLargeTable) {
 		*heapPointer = CHEAT_ENGINE_LOCATION_B4DS-0x400000;
+		if ((u32)ce9 == CARDENGINE_ARM9_LOCATION_DLDI_32) {
+			*heapPointer = CARDENGINE_ARM9_LOCATION_DLDI_32;
+		} else if (_io_dldi_size == 0x0E) {
+			*heapPointer = 0x023DC000;
+		} else if (_io_dldi_size == 0x0F) {
+			*heapPointer = 0x023D8000;
+		}
 	} else {
 		*heapPointer = (fatTableAddr < 0x023C0000 || fatTableAddr >= (u32)ce9) ? (u32)ce9 : fatTableAddr; // shrink heap by FAT table size + ce9 binary size
 	}
@@ -912,11 +1342,26 @@ void patchHiHeapDSiWareThumb(u32 addr, u32 newCodeAddr, u32 heapEnd) {
 
 void patchUserSettingsReadDSiWare(u32 addr) {
 	if (*(u16*)(addr) == 0x4806) { // ldr r0, =0x2FFFDFC (THUMB)
-		*(u16*)(addr) = 0x46C0; // nop
-		*(u16*)(addr+4) = 0xBD38; // POP {R3-R5,PC}
+		*(u16*)(addr) = 0x1C28; // movs r0, r5
+		*(u16*)(addr+4) = 0x3054; // adds r0, #0x54
+		*(u16*)(addr+6) = 0x3464; // adds r4, #0x64
+		*(u16*)(addr+8) = 0x7001; // strb r1, [r0]
+		*(u16*)(addr+0xA) = 0x8820; // ldrh r0, [r4]
+		*(u16*)(addr+0xC) = 0x0740; // lsls r0, r0, #0x1D
+		*(u16*)(addr+0xE) = 0x0F40; // lsrs r0, r0, #0x1D
+		// *(u16*)(addr+0x10) = 0x7028; // strb r0, [r5]
+		// *(u16*)(addr+0x12) = 0xBD38; // pop {r3-r5, pc}
 	} else if (*(u16*)(addr) == 0x4805) { // ldr r0, =0x2FFFDFC (THUMB)
-		*(u16*)(addr) = 0x46C0; // nop
-		*(u16*)(addr+4) = 0xBD10; // POP {R4,PC}
+		*(u16*)(addr) = 0x2100; // movs r1, #0
+		*(u16*)(addr+2) = 0x3054; // adds r0, #0x54
+		*(u16*)(addr+4) = 0x7001; // strb r1, [r0]
+		*(u16*)(addr+6) = 0x4803; // ldr r0, =0x2FFFC80
+		*(u16*)(addr+8) = 0x3064; // adds r0, #0x64
+		*(u16*)(addr+0xA) = 0x8800; // ldrh r0, [r0]
+		*(u16*)(addr+0xC) = 0x0740; // lsls r0, r0, #0x1D
+		*(u16*)(addr+0xE) = 0x0F40; // lsrs r0, r0, #0x1D
+		*(u16*)(addr+0x10) = 0x7020; // strb r0, [r4]
+		*(u16*)(addr+0x12) = 0xBD10; // pop {r4, pc}
 	} else if (*(u32*)(addr) == 0xE594117C) { // ldr r1, [r4,#0x17C]
 		*(u32*)(addr) = 0xE5C50054; // strb r0, [r5,#0x54]
 		*(u32*)(addr+4) = 0xE1D406B4; // ldrh r0, [r4,#0x64]
@@ -940,7 +1385,7 @@ void patchInitDSiWare(u32 addr, u32 heapEnd) {
 		patchHiHeapDSiWare(((u32)func+0x300), heapEnd);
 	} else {
 		bool heapInitPatched = false;
-		for (int i = 0; i < 64; i++) {	
+		for (int i = 0; i < 64; i++) {
 			if (func[i] == 0xE1A00100 && !heapInitPatched) {
 				func[i-2] = 0xE1A00000; // nop
 				i += 16;
@@ -1300,7 +1745,7 @@ void patchSharedFontPath(const cardengineArm9* ce9, const tNDSHeader* ndsHeader,
 		if (ltdModuleParams) {
 			dbg_printf("Ltd module params offset: ");
 			dbg_hexa((u32)ltdModuleParams);
-			dbg_printf("\n");		
+			dbg_printf("\n");
 		}
 
 		u32 iUncompressedSizei = arm9ibinarySize;
@@ -1595,6 +2040,180 @@ void patchTwlFontLoad(u32 heapAllocAddr, u32 newCodeAddr) {
 	setBL(heapAllocAddr, newCodeAddr);
 }
 
+static u32 twlSaveThumbBranchOffset = 0;
+
+static void twlSaveSetTBranch(const u32 patchData0, const u32 patchData1) {
+	static u32 twlSaveThumbBranchOffsetCache[13] = {0};
+	static bool offsetSet[13] = {false};
+
+	int i = 0;
+	for (i = 0; i < 13; i++) {
+		if (!offsetSet[i] || twlSaveThumbBranchOffsetCache[i] == patchData1) {
+			break;
+		}
+	}
+
+	if (!offsetSet[i]) {
+		twlSaveThumbBranchOffsetCache[i] = twlSaveThumbBranchOffset;
+		twlSaveThumbBranchOffset += 4;
+
+		setB(twlSaveThumbBranchOffsetCache[i], (u32)patchData1);
+		offsetSet[i] = true;
+	}
+
+	setBLXThumb(patchData0, twlSaveThumbBranchOffsetCache[i]);
+}
+
+void patchTwlSaveFuncs(const cardengineArm9* ce9) {
+	extern u32 dsi2dsSavePatchFileCluster;
+	extern u32 dsi2dsSavePatchOffset;
+	extern u32 dsi2dsSavePatchSize;
+	if (dsi2dsSavePatchFileCluster == CLUSTER_FREE || dsi2dsSavePatchOffset == 0 || dsi2dsSavePatchSize == 0) {
+		return;
+	}
+
+	const u32* dsiSaveGetResultCode = ce9->patches->dsiSaveGetResultCode;
+	const u32* dsiSaveCreate = ce9->patches->dsiSaveCreate;
+	const u32* dsiSaveDelete = ce9->patches->dsiSaveDelete;
+	const u32* dsiSaveGetInfo = ce9->patches->dsiSaveGetInfo;
+	const u32* dsiSaveSetLength = ce9->patches->dsiSaveSetLength;
+	const u32* dsiSaveOpen = ce9->patches->dsiSaveOpen;
+	const u32* dsiSaveOpenR = ce9->patches->dsiSaveOpenR;
+	const u32* dsiSaveClose = ce9->patches->dsiSaveClose;
+	const u32* dsiSaveGetLength = ce9->patches->dsiSaveGetLength;
+	const u32* dsiSaveGetPosition = ce9->patches->dsiSaveGetPosition;
+	const u32* dsiSaveSeek = ce9->patches->dsiSaveSeek;
+	const u32* dsiSaveRead = ce9->patches->dsiSaveRead;
+	const u32* dsiSaveWrite = ce9->patches->dsiSaveWrite;
+
+	aFile file;
+	getFileFromCluster(&file, dsi2dsSavePatchFileCluster);
+
+	for (u32 i = 0; i < dsi2dsSavePatchSize; i += 8) {
+		u32 patchData[2];
+		fileRead((char*)patchData, &file, dsi2dsSavePatchOffset+i, 8);
+		const bool patchIsThumb = (patchData[0] >= 0x10000000 && patchData[0] < 0x20000000);
+		if (patchIsThumb) {
+			patchData[0] -= 0x10000000;
+		}
+
+		switch (patchData[1]) {
+			case 0x4E494254: // 'TBIN'
+				twlSaveThumbBranchOffset = patchData[0];
+				break;
+			case 0x52544547: // 'GETR'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveGetResultCode);
+				} else if (*(u32*)(patchData[0]) >= 0xEB000000 && *(u32*)(patchData[0]) < 0xEC000000) {
+					setBL(patchData[0], (u32)dsiSaveGetResultCode);
+				} else {
+					tonccpy((u32*)(patchData[0]), dsiSaveGetResultCode, 8);
+				}
+				break;
+			case 0x41455243: // 'CREA'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveCreate);
+				} else if (*(u32*)(patchData[0]) >= 0xEB000000 && *(u32*)(patchData[0]) < 0xEC000000) {
+					setBL(patchData[0], (u32)dsiSaveCreate);
+				} else if (*(u32*)(patchData[0]-4) == 0xE12FFF1C || *(u32*)(patchData[0]-8) == 0xE12FFF1C) {
+					*(u32*)(patchData[0]) = (u32)dsiSaveCreate;
+				}
+				break;
+			case 0x454C4544: // 'DELE'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveDelete);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveDelete);
+				}
+				break;
+			case 0x49544547: // 'GETI'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveGetInfo);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveGetInfo);
+				}
+				break;
+			case 0x4C544553: // 'SETL'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveSetLength);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveSetLength);
+				}
+				break;
+			case 0x4E45504F: // 'OPEN'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveOpen);
+				} else if (*(u32*)(patchData[0]) >= 0xEB000000 && *(u32*)(patchData[0]) < 0xEC000000) {
+					setBL(patchData[0], (u32)dsiSaveOpen);
+				} else if (*(u32*)(patchData[0]-4) == 0xE12FFF1C || *(u32*)(patchData[0]-8) == 0xE12FFF1C) {
+					*(u32*)(patchData[0]) = (u32)dsiSaveOpen;
+				}
+				break;
+			case 0x5245504F: // 'OPER'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveOpenR);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveOpenR);
+				}
+				break;
+			case 0x534F4C43: // 'CLOS'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveClose);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveClose);
+				}
+				break;
+			case 0x4C544547: // 'GETL'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveGetLength);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveGetLength);
+				}
+				break;
+			case 0x50544547: // 'GETP'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveGetPosition);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveGetPosition);
+				}
+				break;
+			case 0x4B454553: // 'SEEK'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveSeek);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveSeek);
+				}
+				break;
+			case 0x44414552: // 'READ'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveRead);
+				} else {
+					setBL(patchData[0], (u32)dsiSaveRead);
+				}
+				break;
+			case 0x54495257: // 'WRIT'
+				if (patchIsThumb) {
+					twlSaveSetTBranch(patchData[0], (u32)dsiSaveWrite);
+				} else if (*(u32*)(patchData[0]) >= 0xEB000000 && *(u32*)(patchData[0]) < 0xEC000000) {
+					setBL(patchData[0], (u32)dsiSaveWrite);
+				} else if (*(u32*)(patchData[0]-4) == 0xE12FFF1C || *(u32*)(patchData[0]-8) == 0xE12FFF1C) {
+					*(u32*)(patchData[0]) = (u32)dsiSaveWrite;
+				}
+				break;
+			default:
+				if (patchIsThumb) {
+					const u32 patchData1 = patchData[1];
+					const u16* patchData1T = (u16*)&patchData1;
+					*(u16*)(patchData[0]) = patchData1T[0];
+					*(u16*)(patchData[0]+2) = patchData1T[1];
+				} else {
+					*(u32*)(patchData[0]) = patchData[1];
+				}
+				break;
+		}
+	}
+}
+
 void codeCopy(u32* dst, u32* src, u32 len) {
 	tonccpy(dst, src, len);
 
@@ -1617,9 +2236,9 @@ void codeCopy(u32* dst, u32* src, u32 len) {
 
 /*void relocate_ce9(u32 default_location, u32 current_location, u32 size) {
     dbg_printf("relocate_ce9\n");
-    
+
     u32 location_sig[1] = {default_location};
-    
+
     u32* firstCardLocation =  findOffset(current_location, size, location_sig, 1);
 	if (!firstCardLocation) {
 		return;
@@ -1629,9 +2248,9 @@ void codeCopy(u32* dst, u32* src, u32 len) {
     dbg_printf(" : ");
     dbg_hexa((u32)*firstCardLocation);
     dbg_printf("\n\n");
-    
+
     *firstCardLocation = current_location;
-    
+
 	u32* armReadCardLocation = findOffset(current_location, size, location_sig, 1);
 	if (!armReadCardLocation) {
 		return;
@@ -1641,9 +2260,9 @@ void codeCopy(u32* dst, u32* src, u32 len) {
     dbg_printf(" : ");
     dbg_hexa((u32)*armReadCardLocation);
     dbg_printf("\n\n");
-    
+
     *armReadCardLocation = current_location;
-    
+
     u32* thumbReadCardLocation =  findOffset(current_location, size, location_sig, 1);
 	if (!thumbReadCardLocation) {
 		return;
@@ -1653,9 +2272,9 @@ void codeCopy(u32* dst, u32* src, u32 len) {
     dbg_printf(" : ");
     dbg_hexa((u32)*thumbReadCardLocation);
     dbg_printf("\n\n");
-    
+
     *thumbReadCardLocation = current_location;
-    
+
     u32* globalCardLocation =  findOffset(current_location, size, location_sig, 1);
 	if (!globalCardLocation) {
 		return;
@@ -1665,17 +2284,17 @@ void codeCopy(u32* dst, u32* src, u32 len) {
     dbg_printf(" : ");
     dbg_hexa((u32)*globalCardLocation);
     dbg_printf("\n\n");
-    
+
     *globalCardLocation = current_location;
-    
+
     // fix the header pointer
     cardengineArm9* ce9 = (cardengineArm9*) current_location;
     ce9->patches = (cardengineArm9Patches*)((u32)ce9->patches - default_location + current_location);
-    
+
     dbg_printf(" ce9->patches ");
 	dbg_hexa((u32) ce9->patches);
     dbg_printf("\n\n");
-    
+
     ce9->thumbPatches = (cardengineArm9ThumbPatches*)((u32)ce9->thumbPatches - default_location + current_location);
     ce9->patches->card_read_arm9 = (u32*)((u32)ce9->patches->card_read_arm9 - default_location + current_location);
     ce9->patches->card_pull_out_arm9 = (u32*)((u32)ce9->patches->card_pull_out_arm9 - default_location + current_location);
@@ -1846,69 +2465,94 @@ static void nandSavePatch(cardengineArm9* ce9, const tNDSHeader* ndsHeader, cons
 
     // WarioWare: D.I.Y. (USA)
 	if (strcmp(romTid, "UORE") == 0) {
-		sdPatchEntry = 0x2002c04; 
+		sdPatchEntry = 0x2002c04;
 	}
     // WarioWare: Do It Yourself (Europe)
     if (strcmp(romTid, "UORP") == 0) {
-		sdPatchEntry = 0x2002ca4; 
+		sdPatchEntry = 0x2002ca4;
 	}
     // Made in Ore (Japan)
     if (strcmp(romTid, "UORJ") == 0) {
-		sdPatchEntry = 0x2002be4; 
+		sdPatchEntry = 0x2002be4;
 	}
 
-    if(sdPatchEntry) {   
-      //u32 gNandInit(void* data)
-      *(u32*)((u8*)sdPatchEntry+0x50C) = 0xe3a00001; //mov r0, #1
-      *(u32*)((u8*)sdPatchEntry+0x510) = 0xe12fff1e; //bx lr
+	if (sdPatchEntry) {
+		//u32 gNandInit(void* data)
+		*(u32*)((u8*)sdPatchEntry+0x50C) = 0xe3a00001; //mov r0, #1
+		*(u32*)((u8*)sdPatchEntry+0x510) = 0xe12fff1e; //bx lr
 
-      //u32 gNandWait(void)
-      *(u32*)((u8*)sdPatchEntry+0xC9C) = 0xe12fff1e; //bx lr
+		//u32 gNandWait(void)
+		*(u32*)((u8*)sdPatchEntry+0xC9C) = 0xe12fff1e; //bx lr
 
-      //u32 gNandState(void)
-      *(u32*)((u8*)sdPatchEntry+0xEB0) = 0xe3a00003; //mov r0, #3
-      *(u32*)((u8*)sdPatchEntry+0xEB4) = 0xe12fff1e; //bx lr
+		//u32 gNandState(void)
+		*(u32*)((u8*)sdPatchEntry+0xEB0) = 0xe3a00003; //mov r0, #3
+		*(u32*)((u8*)sdPatchEntry+0xEB4) = 0xe12fff1e; //bx lr
 
-      //u32 gNandError(void)
-      *(u32*)((u8*)sdPatchEntry+0xEC8) = 0xe3a00000; //mov r0, #0
-      *(u32*)((u8*)sdPatchEntry+0xECC) = 0xe12fff1e; //bx lr
+		//u32 gNandError(void)
+		*(u32*)((u8*)sdPatchEntry+0xEC8) = 0xe3a00000; //mov r0, #0
+		*(u32*)((u8*)sdPatchEntry+0xECC) = 0xe12fff1e; //bx lr
 
-      //u32 gNandWrite(void* memory,void* flash,u32 size,u32 dma_channel)
-      u32* nandWritePatch = ce9->patches->nand_write_arm9;
-      tonccpy((u8*)sdPatchEntry+0x958, nandWritePatch, 0x40);
+		//u32 gNandWrite(void* memory,void* flash,u32 size,u32 dma_channel)
+		*(u32*)(sdPatchEntry+0x958) = 0xE51FF004; // ldr pc, =gNandWrite
+		*(u32*)(sdPatchEntry+0x95C) = (u32)ce9->patches->nand_write_arm9;
 
-      //u32 gNandRead(void* memory,void* flash,u32 size,u32 dma_channel)
-      u32* nandReadPatch = ce9->patches->nand_read_arm9;
-      tonccpy((u8*)sdPatchEntry+0xD24, nandReadPatch, 0x40);
-    } else {
-        // Jam with the Band (Europe)
-        if (strcmp(romTid, "UXBP") == 0) {
-          	//u32 gNandInit(void* data)
-            *(u32*)(0x020613CC) = 0xe3a00001; //mov r0, #1
-            *(u32*)(0x020613D0) = 0xe12fff1e; //bx lr
+		//u32 gNandRead(void* memory,void* flash,u32 size,u32 dma_channel)
+		*(u32*)(sdPatchEntry+0xD24) = 0xE51FF004; // ldr pc, =gNandRead
+		*(u32*)(sdPatchEntry+0xD28) = (u32)ce9->patches->nand_read_arm9;
+	} else
+	// Jam with the Band (Europe)
+	if (strcmp(romTid, "UXBP") == 0) {
+		//u32 gNandInit(void* data)
+		*(u32*)(0x020613CC) = 0xe3a00001; //mov r0, #1
+		*(u32*)(0x020613D0) = 0xe12fff1e; //bx lr
 
-            //u32 gNandResume(void)
-            *(u32*)(0x02061A4C) = 0xe3a00000; //mov r0, #0
-            *(u32*)(0x02061A50) = 0xe12fff1e; //bx lr
+		//u32 gNandResume(void)
+		*(u32*)(0x02061A4C) = 0xe3a00000; //mov r0, #0
+		*(u32*)(0x02061A50) = 0xe12fff1e; //bx lr
 
-            //u32 gNandError(void)
-            *(u32*)(0x02061C24) = 0xe3a00000; //mov r0, #0
-            *(u32*)(0x02061C28) = 0xe12fff1e; //bx lr
+		//u32 gNandError(void)
+		*(u32*)(0x02061C24) = 0xe3a00000; //mov r0, #0
+		*(u32*)(0x02061C28) = 0xe12fff1e; //bx lr
 
-            //u32 gNandWrite(void* memory,void* flash,u32 size,u32 dma_channel)
-            u32* nandWritePatch = ce9->patches->nand_write_arm9;
-            tonccpy((u32*)0x0206176C, nandWritePatch, 0x40);
+		//u32 gNandWrite(void* memory,void* flash,u32 size,u32 dma_channel)
+		*(u32*)0x0206176C = 0xE51FF004; // ldr pc, =gNandWrite
+		*(u32*)0x02061770 = (u32)ce9->patches->nand_write_arm9;
 
-            //u32 gNandRead(void* memory,void* flash,u32 size,u32 dma_channel)
-            u32* nandReadPatch = ce9->patches->nand_read_arm9;
-            tonccpy((u32*)0x02061AC4, nandReadPatch, 0x40);
-    	}
+		//u32 gNandRead(void* memory,void* flash,u32 size,u32 dma_channel)
+		*(u32*)0x02061AC4 = 0xE51FF004; // ldr pc, =gNandRead
+		*(u32*)0x02061AC8 = (u32)ce9->patches->nand_read_arm9;
+	} else
+	// Nintendo DS Guide (World)
+	if (strncmp(romTid, "UGD", 3) == 0) {
+		//u32 gNandInit(void* data)
+		*(u32*)(0x02009298) = 0xe3a00001; //mov r0, #1
+		*(u32*)(0x0200929C) = 0xe12fff1e; //bx lr
+
+		//u32 gNandResume(void)
+		*(u32*)(0x020098C8) = 0xe3a00000; //mov r0, #0
+		*(u32*)(0x020098CC) = 0xe12fff1e; //bx lr
+
+		//u32 gNandState(void)
+		*(u32*)(0x02009AA8) = 0xe1a00000; //nop
+		*(u32*)(0x02009AB0) = 0x06600000;
+
+		//u32 gNandError(void)
+		*(u32*)(0x02009AB4) = 0xe3a00000; //mov r0, #0
+		*(u32*)(0x02009AB8) = 0xe12fff1e; //bx lr
+
+		//u32 gNandWrite(void* memory,void* flash,u32 size,u32 dma_channel)
+		*(u32*)0x0200961C = 0xE51FF004; // ldr pc, =gNandWrite
+		*(u32*)0x02009620 = (u32)ce9->patches->nand_write_arm9;
+
+		//u32 gNandRead(void* memory,void* flash,u32 size,u32 dma_channel)
+		*(u32*)0x02009940 = 0xE51FF004; // ldr pc, =gNandRead
+		*(u32*)0x02009944 = (u32)ce9->patches->nand_read_arm9;
 	}
 }
 
 static void patchCardReadPdash(cardengineArm9* ce9, const tNDSHeader* ndsHeader) {
     u32 sdPatchEntry = 0;
-    
+
 	const char* romTid = getRomTid(ndsHeader);
 	if (strncmp(romTid, "APD", 3) != 0 && strncmp(romTid, "A24", 3) != 0) return;
 
@@ -1947,10 +2591,10 @@ static void patchCardReadPdash(cardengineArm9* ce9, const tNDSHeader* ndsHeader)
 		sdPatchEntry = 0x206E06C;
 	}
 
-    if(sdPatchEntry) {   
+    if(sdPatchEntry) {
      	// Patch
     	u32* pDashReadPatch = ce9->patches->pdash_read;
-    	tonccpy((u32*)sdPatchEntry, pDashReadPatch, 0x40);   
+    	tonccpy((u32*)sdPatchEntry, pDashReadPatch, 0x40);
     }
 }
 
@@ -1991,11 +2635,6 @@ static void operaRamPatch(void) {
 	}
 }
 
-static void setFlushCache(cardengineArm9* ce9, u32 patchMpuRegion, bool usesThumb) {
-	//if (!usesThumb) {
-	ce9->patches->needFlushDCCache = (patchMpuRegion == 1);
-}
-
 u32 patchCardNdsArm9(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const module_params_t* moduleParams, u32 patchMpuRegion, const bool usesCloneboot) {
 	bool usesThumb;
 	int readType;
@@ -2014,10 +2653,12 @@ u32 patchCardNdsArm9(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const mod
     if (strncmp(romTid, "UOR", 3) == 0) { // Start at 0x2003800 for "WarioWare: DIY"
         startOffset = (u32)ndsHeader->arm9destination + 0x3800;
     } else if (strncmp(romTid, "UXB", 3) == 0) { // Start at 0x2080000 for "Jam with the Band"
-        startOffset = (u32)ndsHeader->arm9destination + 0x80000;        
+        startOffset = (u32)ndsHeader->arm9destination + 0x80000;
     } else if (strncmp(romTid, "USK", 3) == 0) { // Start at 0x20E8000 for "Face Training"
-        startOffset = (u32)ndsHeader->arm9destination + 0xE4000;        
-    }
+        startOffset = (u32)ndsHeader->arm9destination + 0xE4000;
+    } else if (strncmp(romTid, "UGD", 3) == 0) { // Start at 0x2010000 for "Nintendo DS Guide"
+		startOffset = (u32)ndsHeader->arm9destination + 0x10000;
+	}
 
     dbg_printf("startOffset : ");
     dbg_hexa(startOffset);
@@ -2029,12 +2670,14 @@ u32 patchCardNdsArm9(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const mod
 		extern u32 accessControl;
 
 		if (((accessControl & BIT(4))
+		   || strncmp(romTid, "DMF", 3) == 0
 		   || (strncmp(romTid, "DME", 3) == 0 && extendedMemory)
 		   || (strncmp(romTid, "DMD", 3) == 0 && extendedMemory)
 		   || strncmp(romTid, "DMP", 3) == 0
 		   || strncmp(romTid, "DHS", 3) == 0
+		   || (strncmp(romTid, "DSY", 3) == 0 && extendedMemory)
 		)	&& arm7mbk == 0x080037C0 && donorFileCluster != CLUSTER_FREE) {
-			u32 startOffset = (u32)ndsHeader->arm9executeAddress;
+			const u32 startOffset = (u32)ndsHeader->arm9executeAddress;
 			if (moduleParams->sdk_version > 0x5050000) {
 				*(u32*)(startOffset+0x38) = 0xE1A00000; // nop
 				*(u32*)(startOffset+0x19C) = 0xE1A00000; // nop
@@ -2043,6 +2686,15 @@ u32 patchCardNdsArm9(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const mod
 			}
 
 			patchTwlSleepMode(ndsHeader, moduleParams);
+		} else if ((accessControl & BIT(4)) && arm7mbk != 0x080037C0 && moduleParams->sdk_version > 0x5050000) {
+			unpatchedFunctions* unpatchedFuncs = (unpatchedFunctions*)UNPATCHED_FUNCTION_LOCATION;
+			u32 startOffset = (u32)ndsHeader->arm9executeAddress;
+			startOffset += 0x38;
+
+			unpatchedFuncs->exeCodeOffset = (u32*)startOffset;
+			unpatchedFuncs->exeCode = *(u32*)startOffset;
+
+			*(u32*)startOffset = 0xE1A00000; // nop
 		}
 	}
 
@@ -2061,6 +2713,8 @@ u32 patchCardNdsArm9(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const mod
 		dbg_printf("ERR_LOAD_OTHR\n\n");
 		return ERR_LOAD_OTHR;
 	}
+
+	patchCardSaveCmd(ce9, ndsHeader, moduleParams);
 
 	if (strncmp(romTid, "V2G", 3) == 0) {
 		// try to patch card read a second time
@@ -2087,23 +2741,24 @@ u32 patchCardNdsArm9(cardengineArm9* ce9, const tNDSHeader* ndsHeader, const mod
 		}
 	}
 
-	patchCardReadDma(ce9, ndsHeader, moduleParams, usesThumb);
+	if (!patchCardSetDma(ce9, ndsHeader, moduleParams, usesThumb)) {
+		patchCardReadDma(ce9, ndsHeader, moduleParams, usesThumb);
+	}
+	if (!patchCardEndReadDma(ce9, ndsHeader, moduleParams, usesThumb)) {
+		randomPatch(ndsHeader, moduleParams);
+		randomPatch5Second(ndsHeader, moduleParams);
+	}
 
 	//patchDownloadplay(ndsHeader);
 
 	patchReset(ce9, ndsHeader, moduleParams);
 	patchResetTwl(ce9, ndsHeader, moduleParams);
 
-	randomPatch(ndsHeader, moduleParams);
-	randomPatch5Second(ndsHeader, moduleParams);
-
 	if (strcmp(romTid, "UBRP") == 0) {
 		operaRamPatch();
 	}
 
 	nandSavePatch(ce9, ndsHeader, moduleParams);
-    
-	setFlushCache(ce9, patchMpuRegion, usesThumb);
 
 	dbg_printf("ERR_NONE\n\n");
 	return ERR_NONE;
@@ -2116,12 +2771,14 @@ void patchCardNdsArm9Cont(cardengineArm9* ce9, const tNDSHeader* ndsHeader, cons
 
 	patchSharedFontPath(ce9, ndsHeader, moduleParams);
 
+	patchTwlSaveFuncs(ce9);
+
 	// Further patching in order for DSiWare to boot with NTR ARM7 binary
 	extern u8 arm7newUnitCode;
 	extern u32 arm7mbk;
 	extern u32 donorFileCluster;
 	if (arm7newUnitCode == 0 && arm7mbk == 0x080037C0 && donorFileCluster != CLUSTER_FREE) {
-		u32 startOffset = (u32)ndsHeader->arm9executeAddress;
+		const u32 startOffset = (u32)ndsHeader->arm9executeAddress;
 		if (moduleParams->sdk_version > 0x5050000) {
 			setB(startOffset+0x6C, startOffset+0xF0);
 		} else {
